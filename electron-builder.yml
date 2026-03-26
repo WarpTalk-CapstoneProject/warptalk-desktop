@@ -1,0 +1,30 @@
+appId: com.warptalk.desktop
+productName: WarpTalk
+copyright: Copyright © 2026 WarpTalk Team
+
+directories:
+  output: out
+  buildResources: resources
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+
+win:
+  target:
+    - nsis
+    - portable
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Office
+
+publish:
+  provider: github
+  owner: WarpTalk-CapstoneProject
+  repo: warptalk-desktop
