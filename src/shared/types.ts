@@ -8,8 +8,8 @@ export interface WarpTalkAPI {
   getPlatform: () => string;
   startAudioCapture: () => Promise<void>;
   stopAudioCapture: () => Promise<void>;
-  joinMeeting: (meetingId: string) => Promise<void>;
-  leaveMeeting: () => Promise<void>;
+  joinTranslationRoom: (translationRoomId: string) => Promise<void>;
+  leaveTranslationRoom: () => Promise<void>;
   onTranscript: (callback: (data: TranscriptUpdate) => void) => void;
   onTranslation: (callback: (data: TranslationUpdate) => void) => void;
   onConnectionStatus: (callback: (status: ConnectionStatus) => void) => void;
@@ -19,7 +19,7 @@ export interface WarpTalkAPI {
 }
 
 export interface TranscriptUpdate {
-  meetingId: string;
+  translationRoomId: string;
   speakerId: string;
   speakerName: string;
   text: string;
@@ -29,7 +29,7 @@ export interface TranscriptUpdate {
 }
 
 export interface TranslationUpdate {
-  meetingId: string;
+  translationRoomId: string;
   originalText: string;
   translatedText: string;
   sourceLanguage: string;

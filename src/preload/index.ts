@@ -17,10 +17,10 @@ contextBridge.exposeInMainWorld("warptalk", {
   stopAudioCapture: (): Promise<void> =>
     ipcRenderer.invoke("audio:stop-capture"),
 
-  // ── Meeting ──────────────────────────────────────────────────────
-  joinMeeting: (meetingId: string): Promise<void> =>
-    ipcRenderer.invoke("meeting:join", meetingId),
-  leaveMeeting: (): Promise<void> => ipcRenderer.invoke("meeting:leave"),
+  // ── TranslationRoom ──────────────────────────────────────────────────────
+  joinTranslationRoom: (translationRoomId: string): Promise<void> =>
+    ipcRenderer.invoke("translationRoom:join", translationRoomId),
+  leaveTranslationRoom: (): Promise<void> => ipcRenderer.invoke("translationRoom:leave"),
 
   // ── Events (main → renderer) ─────────────────────────────────────
   onTranscript: (callback: (data: unknown) => void): void => {
