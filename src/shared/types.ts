@@ -6,6 +6,7 @@
 export interface WarpTalkAPI {
   getVersion: () => Promise<string>;
   getPlatform: () => string;
+  getRuntimeCapability: () => Promise<DesktopRuntimeCapability>;
   startAudioCapture: () => Promise<void>;
   stopAudioCapture: () => Promise<void>;
   joinTranslationRoom: (translationRoomId: string) => Promise<void>;
@@ -16,6 +17,43 @@ export interface WarpTalkAPI {
   minimize: () => void;
   maximize: () => void;
   close: () => void;
+}
+
+export interface DesktopRuntimeCapability {
+  deviceIdHash: string;
+  os: string;
+  ramTotalMb: number;
+  ramAvailableMb: number;
+  cpuCores: number;
+  gpuType: string;
+  supportsLocalPiper: boolean;
+  supportsLocalClone: boolean;
+  audioDriverReady: boolean;
+  virtualMicReady: boolean;
+  lastProbeLatencyMs: number;
+}
+
+export interface AudioChunkMetadata {
+  sourceRuntime: "web" | "desktop";
+  vadConfidence: number;
+  speechStartMs: number;
+  speechEndMs: number;
+  inputLufs: number;
+  noiseSuppressionEnabled: boolean;
+}
+
+export interface TranslatedAudioMetadata {
+  voiceType: "default" | "blended" | "cloned";
+  voiceMode?: "standard" | "blended" | "cloned" | "caption_only";
+  cloneStrength?: number;
+  anchorProvider?: string;
+  cloneProvider?: string;
+  renderLocation?: "server" | "desktop";
+  cacheKey?: string;
+  cacheHit?: boolean;
+  synthesisLatencyMs?: number;
+  conversionLatencyMs?: number;
+  fallbackReason?: string;
 }
 
 export interface TranscriptUpdate {

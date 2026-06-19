@@ -2,11 +2,34 @@
  * WarpTalk Desktop — Electron Main Process Entry Point
  */
 
-import { app, BrowserWindow, Tray, Menu, nativeImage } from "electron";
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain } from "electron";
 import path from "path";
+
+import { AudioRuntimeService } from "./audio-runtime";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+const audioRuntime = new AudioRuntimeService();
+
+function registerIpcHandlers(): void {
+  ipcMain.handle("app:version", () => app.getVersion());
+  ipcMain.handle("runtime:capability", () => audioRuntime.getCapability());
+  ipcMain.handle("audio:start-capture", async () => undefined);
+  ipcMain.handle("audio:stop-capture", async () => undefined);
+  ipcMain.handle("translationRoom:join", async () => undefined);
+  ipcMain.handle("translationRoom:leave", async () => undefined);
+
+  ipcMain.on("window:minimize", () => mainWindow?.minimize());
+  ipcMain.on("window:maximize", () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize();
+    } else {
+      mainWindow.maximize();
+    }
+  });
+  ipcMain.on("window:close", () => mainWindow?.close());
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -88,6 +111,7 @@ function createTray(): void {
 }
 
 app.whenReady().then(() => {
+  registerIpcHandlers();
   createWindow();
   createTray();
 

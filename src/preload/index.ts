@@ -6,10 +6,14 @@
 
 import { contextBridge, ipcRenderer } from "electron";
 
+import type { DesktopRuntimeCapability } from "../shared/types";
+
 contextBridge.exposeInMainWorld("warptalk", {
   // ── App Info ─────────────────────────────────────────────────────
   getVersion: (): Promise<string> => ipcRenderer.invoke("app:version"),
   getPlatform: (): string => process.platform,
+  getRuntimeCapability: (): Promise<DesktopRuntimeCapability> =>
+    ipcRenderer.invoke("runtime:capability"),
 
   // ── Audio ────────────────────────────────────────────────────────
   startAudioCapture: (): Promise<void> =>
