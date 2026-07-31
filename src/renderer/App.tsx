@@ -2,14 +2,15 @@ import { useState, type FormEvent, type JSX } from "react";
 
 import { LineWaves } from "./LineWaves";
 import { SplitText } from "./SplitText";
+import { DashboardLayout } from "./components/dashboard/DashboardLayout";
 import "./styles.css";
 
 const CONTACT_URL = "https://warptalk.vn/#contact";
-const WELCOME_TITLE = "Ch\u00e0o m\u1eebng b\u1ea1n quay tr\u1edf l\u1ea1i Warptalk";
-const CONTACT_LABEL = "Li\u00ean h\u1ec7 v\u1edbi ch\u00fang t\u00f4i";
-const LOGIN_TITLE = "\u0110\u0103ng nh\u1eadp";
+const WELCOME_TITLE = "Chào mừng bạn quay lại Warptalk";
+const CONTACT_LABEL = "Liên hệ với chúng tôi";
+const LOGIN_TITLE = "Đăng nhập";
 
-type ViewMode = "welcome" | "login";
+type ViewMode = "welcome" | "login" | "dashboard";
 
 function openContactPage(): void {
   void window.warptalk?.openExternal(CONTACT_URL);
@@ -25,8 +26,28 @@ export default function App(): JSX.Element {
     event.preventDefault();
     if (!emailSubmitted) {
       setEmailSubmitted(true);
+    } else {
+      // User entered password and clicked Log In -> Transition to Dashboard
+      setMode("dashboard");
     }
   };
+
+  const handleGoogleLogin = () => {
+    if (!email) setEmail("google.user@warptalk.vn");
+    setMode("dashboard");
+  };
+
+  if (mode === "dashboard") {
+    return (
+      <DashboardLayout
+        userEmail={email || "user@warptalk.vn"}
+        onLogout={() => {
+          setMode("welcome");
+          setEmailSubmitted(false);
+        }}
+      />
+    );
+  }
 
   return (
     <main className="desktop-shell">
@@ -89,7 +110,11 @@ export default function App(): JSX.Element {
           <form onSubmit={submitLogin} className="login-form">
             {!emailSubmitted ? (
               <>
-                <button type="button" className="google-button">
+                <button
+                  type="button"
+                  className="google-button"
+                  onClick={handleGoogleLogin}
+                >
                   <span>G</span>
                   Continue with Google
                 </button>
