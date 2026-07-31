@@ -14,6 +14,7 @@ export interface WarpTalkAPI {
   onTranscript: (callback: (data: TranscriptUpdate) => void) => void;
   onTranslation: (callback: (data: TranslationUpdate) => void) => void;
   onConnectionStatus: (callback: (status: ConnectionStatus) => void) => void;
+  openExternal: (url: string) => Promise<void>;
   minimize: () => void;
   maximize: () => void;
   close: () => void;

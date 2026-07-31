@@ -1,10 +1,18 @@
 appId: com.warptalk.desktop
-productName: WarpTalk
-copyright: Copyright © 2026 WarpTalk Team
+productName: Warptalk-V1
+copyright: Copyright (c) 2026 WarpTalk Team
 
 directories:
-  output: out
+  output: release
   buildResources: resources
+
+afterPack: scripts/after-pack.js
+
+extraResources:
+  - from: resources/warptalk-logo-primary.ico
+    to: warptalk-logo-primary.ico
+  - from: resources/warptalk-logo-primary.png
+    to: warptalk-logo-primary.png
 
 mac:
   category: public.app-category.productivity
@@ -14,9 +22,16 @@ mac:
   hardenedRuntime: true
 
 win:
+  signAndEditExecutable: false
+  icon: resources/warptalk-logo-primary.ico
   target:
     - nsis
     - portable
+
+nsis:
+  installerIcon: resources/warptalk-logo-primary.ico
+  uninstallerIcon: resources/warptalk-logo-primary.ico
+  shortcutName: Warptalk-V1
 
 linux:
   target:

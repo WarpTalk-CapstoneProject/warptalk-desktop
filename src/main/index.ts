@@ -1,8 +1,18 @@
 /**
- * WarpTalk Desktop — Electron Main Process Entry Point
+ * WarpTalk Desktop - Electron Main Process Entry Point
  */
 
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain } from "electron";
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  Menu,
+  nativeImage,
+  shell,
+  Tray,
+} from "electron";
+import fs from "fs";
+import { spawn } from "child_process";
 import path from "path";
 
 import { AudioRuntimeService } from "./audio-runtime";
@@ -10,10 +20,25 @@ import { AudioRuntimeService } from "./audio-runtime";
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 const audioRuntime = new AudioRuntimeService();
+const APP_NAME = "Warptalk-V1";
+const APP_MODEL_ID = "com.warptalk.desktop";
+const WINDOW_TITLE = "";
+
+app.setName(APP_NAME);
+app.setAppUserModelId(APP_MODEL_ID);
+
+function getDesktopAssetPath(fileName: string): string {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, fileName)
+    : path.resolve(process.cwd(), "resources", fileName);
+}
 
 function registerIpcHandlers(): void {
   ipcMain.handle("app:version", () => app.getVersion());
   ipcMain.handle("runtime:capability", () => audioRuntime.getCapability());
+  ipcMain.handle("app:open-external", async (_event, url: string) => {
+    openExternalUrl(url);
+  });
   ipcMain.handle("audio:start-capture", async () => undefined);
   ipcMain.handle("audio:stop-capture", async () => undefined);
   ipcMain.handle("translationRoom:join", async () => undefined);
@@ -31,13 +56,15 @@ function registerIpcHandlers(): void {
   ipcMain.on("window:close", () => mainWindow?.close());
 }
 
-function createWindow(): void {
+async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    title: "WarpTalk",
+    title: WINDOW_TITLE,
+    icon: getDesktopAssetPath("warptalk-logo-primary.ico"),
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
@@ -45,13 +72,24 @@ function createWindow(): void {
       sandbox: true,
     },
   });
+  mainWindow.on("page-title-updated", (event) => {
+    event.preventDefault();
+    mainWindow?.setTitle(WINDOW_TITLE);
+  });
 
-  // Load renderer
-  if (process.env.NODE_ENV === "development") {
-    mainWindow.loadURL("http://localhost:5173");
-    mainWindow.webContents.openDevTools();
+  const devRendererUrl = process.env.ELECTRON_RENDERER_URL;
+  if (!app.isPackaged && devRendererUrl) {
+    await mainWindow.loadURL(devRendererUrl);
   } else {
-    mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+    await mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+  }
+
+  mainWindow.setMenuBarVisibility(false);
+  mainWindow.setAutoHideMenuBar(true);
+  mainWindow.setTitle(WINDOW_TITLE);
+
+  if (process.env.NODE_ENV === "development") {
+    mainWindow.webContents.openDevTools();
   }
 
   mainWindow.on("closed", () => {
@@ -67,16 +105,59 @@ function createWindow(): void {
   });
 }
 
+function openExternalUrl(url: string): void {
+  if (process.platform === "win32") {
+    const chromePaths = [
+      path.join(
+        process.env.PROGRAMFILES ?? "",
+        "Google",
+        "Chrome",
+        "Application",
+        "chrome.exe",
+      ),
+      path.join(
+        process.env["PROGRAMFILES(X86)"] ?? "",
+        "Google",
+        "Chrome",
+        "Application",
+        "chrome.exe",
+      ),
+      path.join(
+        process.env.LOCALAPPDATA ?? "",
+        "Google",
+        "Chrome",
+        "Application",
+        "chrome.exe",
+      ),
+    ];
+    const chromePath = chromePaths.find(
+      (candidate) => candidate && fs.existsSync(candidate),
+    );
+    if (chromePath) {
+      const child = spawn(chromePath, [url], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      child.unref();
+      return;
+    }
+  }
+
+  void shell.openExternal(url);
+}
+
 function createTray(): void {
-  // TODO: Replace with actual app icon
-  const icon = nativeImage.createEmpty();
+  const icon = nativeImage.createFromPath(
+    getDesktopAssetPath("warptalk-logo-primary.ico"),
+  );
 
   tray = new Tray(icon);
-  tray.setToolTip("WarpTalk");
+  tray.setToolTip(APP_NAME);
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: "Show WarpTalk",
+      label: `Show ${APP_NAME}`,
       click: () => mainWindow?.show(),
     },
     { type: "separator" },
@@ -111,13 +192,14 @@ function createTray(): void {
 }
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   registerIpcHandlers();
-  createWindow();
+  void createWindow();
   createTray();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+      void createWindow();
     }
   });
 });
