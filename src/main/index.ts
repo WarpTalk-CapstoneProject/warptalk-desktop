@@ -16,13 +16,19 @@ import { spawn } from "child_process";
 import path from "path";
 
 import { AudioRuntimeService } from "./audio-runtime";
+import { WebRuntimeService } from "./web-runtime";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 const audioRuntime = new AudioRuntimeService();
+const webRuntime = new WebRuntimeService();
 const APP_NAME = "Warptalk-V1";
 const APP_MODEL_ID = "com.warptalk.desktop";
 const WINDOW_TITLE = "";
+const GOOGLE_AUTH_HOSTS = new Set([
+  "accounts.google.com",
+  "oauth.googleusercontent.com",
+]);
 
 app.setName(APP_NAME);
 app.setAppUserModelId(APP_MODEL_ID);
@@ -56,6 +62,36 @@ function registerIpcHandlers(): void {
   ipcMain.on("window:close", () => mainWindow?.close());
 }
 
+function getUrlOrigin(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+function shouldAllowAuthPopup(url: string): boolean {
+  if (url === "about:blank") {
+    return true;
+  }
+
+  try {
+    const target = new URL(url);
+    return GOOGLE_AUTH_HOSTS.has(target.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isDesktopLandingUrl(url: string, trustedOrigin: string): boolean {
+  try {
+    const target = new URL(url);
+    return target.origin === trustedOrigin && target.pathname === "/";
+  } catch {
+    return false;
+  }
+}
+
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -77,12 +113,57 @@ async function createWindow(): Promise<void> {
     mainWindow?.setTitle(WINDOW_TITLE);
   });
 
-  const devRendererUrl = process.env.ELECTRON_RENDERER_URL;
-  if (!app.isPackaged && devRendererUrl) {
-    await mainWindow.loadURL(devRendererUrl);
-  } else {
-    await mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
-  }
+  const rendererUrl = await webRuntime.getRendererUrl();
+  const trustedOrigin = webRuntime.getTrustedOrigin(rendererUrl);
+  const desktopEntryUrl = webRuntime.getDesktopEntryUrl(rendererUrl);
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    const targetOrigin = getUrlOrigin(url);
+    if (targetOrigin === trustedOrigin) {
+      return { action: "allow" };
+    }
+
+    if (shouldAllowAuthPopup(url)) {
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: {
+          width: 520,
+          height: 720,
+          autoHideMenuBar: true,
+          webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+          },
+        },
+      };
+    }
+
+    openExternalUrl(url);
+    return { action: "deny" };
+  });
+
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    const targetOrigin = getUrlOrigin(url);
+    if (isDesktopLandingUrl(url, trustedOrigin)) {
+      event.preventDefault();
+      void mainWindow?.loadURL(desktopEntryUrl);
+      return;
+    }
+
+    if (!targetOrigin || targetOrigin === trustedOrigin) return;
+
+    event.preventDefault();
+    openExternalUrl(url);
+  });
+
+  mainWindow.webContents.on("did-navigate-in-page", (_event, url) => {
+    if (isDesktopLandingUrl(url, trustedOrigin)) {
+      void mainWindow?.loadURL(desktopEntryUrl);
+    }
+  });
+
+  await mainWindow.loadURL(desktopEntryUrl);
 
   mainWindow.setMenuBarVisibility(false);
   mainWindow.setAutoHideMenuBar(true);
@@ -202,6 +283,10 @@ app.whenReady().then(() => {
       void createWindow();
     }
   });
+});
+
+app.on("before-quit", () => {
+  webRuntime.stop();
 });
 
 app.on("window-all-closed", () => {

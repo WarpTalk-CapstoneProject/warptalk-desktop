@@ -1,12 +1,29 @@
 # WarpTalk Desktop
 
-Desktop client for WarpTalk, built with Electron, React, and TypeScript.
+Desktop shell for WarpTalk, built with Electron and the production UI from
+`warptalk-web`.
 
-## Quick Start
+## UI Source
+
+`warptalk-desktop` loads the Next.js app from `../warptalk-web`.
+The desktop entry route is `/login`, so the desktop app skips the public
+landing page and starts at the login flow.
+
+After authentication, the web app redirects into `/workspace` and the dashboard
+uses the same UI/UX as `warptalk-web`.
+
+## Development
 
 ```bash
 npm install
 npm run dev
+```
+
+`npm run dev` starts `warptalk-web` and then opens Electron against the local
+web UI. If the web app is already running, use:
+
+```bash
+npm run dev:desktop
 ```
 
 ## Build
@@ -16,27 +33,5 @@ npm run typecheck
 npm run build:win
 ```
 
-The Windows installer and portable build are written to `release/`.
-
-## UI Boundary
-
-`warptalk-desktop` owns its own renderer UI in `src/renderer`.
-It does not build, copy, or load `warptalk-web`.
-
-Only sync UI with `warptalk-web` when that is explicitly requested.
-
-## Project Structure
-
-```text
-warptalk-desktop/
-|-- resources/                # App icons and native build assets
-|-- scripts/                  # Packaging hooks
-|-- src/
-|   |-- main/                 # Electron main process
-|   |-- preload/              # Secure renderer bridge
-|   |-- renderer/             # React desktop UI
-|   `-- shared/               # Shared types
-|-- electron-builder.yml
-|-- package.json
-`-- tsconfig.json
-```
+`npm run build:win` builds `warptalk-web` first, copies the standalone Next.js
+output into Electron resources, and writes the Windows installer to `release/`.
