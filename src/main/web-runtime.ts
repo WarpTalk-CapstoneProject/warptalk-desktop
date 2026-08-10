@@ -4,7 +4,7 @@ import http from "http";
 import net from "net";
 import path from "path";
 
-const DESKTOP_ENTRY_PATH = "/login";
+const DESKTOP_ENTRY_PATH = "/desktop-login";
 const DEFAULT_DEV_URL = `http://localhost:3000${DESKTOP_ENTRY_PATH}`;
 const DEFAULT_PROD_PORT = 3030;
 
