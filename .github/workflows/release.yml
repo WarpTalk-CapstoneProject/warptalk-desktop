@@ -1,0 +1,67 @@
+name: Release
+
+# Cutting a release is what puts installers on https://warptalk.vn/download — that page reads
+# the latest GitHub Release of this repo and links its assets directly. Tag and push to ship:
+#
+#   npm version minor && git push --follow-tags
+#
+# workflow_dispatch is for re-running a failed platform without moving the tag.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not delete the assets the others already uploaded.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+            build: npm run build:mac:remote
+          - os: windows-latest
+            name: Windows
+            build: npm run build:win:remote
+          - os: ubuntu-latest
+            name: Linux
+            build: npm run build:linux:remote
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build and publish
+        run: ${{ matrix.build }} -- --publish always
+        env:
+          # electron-builder reads this to create/update the GitHub Release named after the tag.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Code signing. Left unset until the team buys certificates: electron-builder then
+          # produces unsigned builds rather than failing, which is what we want for now.
+          CSC_LINK: ${{ secrets.MAC_CERTIFICATE_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CERTIFICATE_PFX }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CERTIFICATE_PASSWORD }}

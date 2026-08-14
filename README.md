@@ -77,3 +77,51 @@ Only public frontend values belong in `.env.production.local`. Backend secrets
 such as database passwords, JWT secrets, OpenAI keys, and LiveKit API secrets
 must stay on the server. Remote-web builds do not need this file because the
 deployed website already owns those public frontend values.
+
+## Releasing
+
+`https://warptalk.vn/download` is generated from this repo. The page calls the
+GitHub API for the **latest release** of
+`WarpTalk-CapstoneProject/warptalk-desktop`, sorts the attached assets by
+platform, and links them directly. A new GitHub Release is the publish step for
+new desktop installers.
+
+```bash
+npm version minor        # bumps package.json and creates the vX.Y.Z tag
+git push --follow-tags   # triggers .github/workflows/release.yml
+```
+
+The workflow builds remote-web installers on macOS, Windows and Linux runners
+in parallel and hands the artifacts to `electron-builder --publish always`,
+which creates the GitHub Release named after the tag.
+
+Requirements for it to succeed:
+
+- **The repo must be public.** The download page links `browser_download_url`
+  straight at the asset; on a private repo those URLs 404 for anyone not signed
+  in to GitHub. If the repo has to stay private, mirror the artifacts to R2 and
+  point the web app at a manifest instead. See `DESKTOP_RELEASE_MANIFEST_URL`
+  in `warptalk-web/src/lib/desktop-releases.server.ts`.
+- **`package-lock.json` must be committed** because the workflow uses `npm ci`.
+- **`src/renderer/index.html` must exist.** electron-vite infers its config
+  from the `src/main` + `src/preload` + `src/renderer/index.html` layout.
+- `npm run typecheck` must pass; it gates the build.
+
+Builds are **unsigned** until `MAC_CERTIFICATE_P12` / `WIN_CERTIFICATE_PFX` are
+added as repo secrets. Unsigned builds still install, but macOS Gatekeeper and
+Windows SmartScreen show warnings.
+
+## Project Structure
+
+```text
+warptalk-desktop/
+├── src/
+│   ├── main/        # Electron main process
+│   ├── preload/     # Secure bridge exposed to the deployed web app
+│   └── renderer/    # Minimal fallback renderer built by electron-vite
+├── resources/       # App icons and assets
+├── electron-builder.yml
+├── electron-builder.remote.yml
+├── package.json
+└── tsconfig.json
+```
