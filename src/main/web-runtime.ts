@@ -6,6 +6,7 @@ import path from "path";
 
 const DESKTOP_ENTRY_PATH = "/desktop-login";
 const DEFAULT_DEV_URL = `http://localhost:3000${DESKTOP_ENTRY_PATH}`;
+const DEFAULT_REMOTE_PROD_URL = `https://app.warptalk.io.vn${DESKTOP_ENTRY_PATH}`;
 const DEFAULT_PROD_PORT = 3030;
 
 export class WebRuntimeService {
@@ -13,8 +14,18 @@ export class WebRuntimeService {
   private rendererUrl: string | null = null;
 
   async getRendererUrl(): Promise<string> {
+    const configuredWebUrl = process.env.WARPTALK_WEB_URL?.trim();
+
     if (process.env.NODE_ENV === "development") {
-      return process.env.WARPTALK_WEB_URL || DEFAULT_DEV_URL;
+      return configuredWebUrl || DEFAULT_DEV_URL;
+    }
+
+    if (configuredWebUrl) {
+      return configuredWebUrl;
+    }
+
+    if (process.env.WARPTALK_DESKTOP_WEB_MODE !== "local") {
+      return DEFAULT_REMOTE_PROD_URL;
     }
 
     if (this.rendererUrl) {

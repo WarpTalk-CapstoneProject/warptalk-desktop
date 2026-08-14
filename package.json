@@ -15,6 +15,10 @@
     "build:win": "npm run build:web && electron-vite build && electron-builder --win",
     "build:win:production": "npm run build:web:production && electron-vite build && electron-builder --win",
     "build:linux": "npm run build:web && electron-vite build && electron-builder --linux",
+    "build:remote": "electron-vite build && electron-builder --config electron-builder.remote.yml",
+    "build:win:remote": "electron-vite build && electron-builder --config electron-builder.remote.yml --win",
+    "build:mac:remote": "electron-vite build && electron-builder --config electron-builder.remote.yml --mac",
+    "build:linux:remote": "electron-vite build && electron-builder --config electron-builder.remote.yml --linux",
     "preview": "electron-vite preview",
     "lint": "eslint src/ --ext .ts,.tsx",
     "typecheck": "tsc --noEmit"
