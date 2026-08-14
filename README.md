@@ -42,7 +42,7 @@ npm run typecheck
 npm run build:win:remote
 ```
 
-This build does not package the Next.js standalone output. The installed app
+This remote build does not package the Next.js standalone output. The installed app
 opens `https://app.warptalk.io.vn/desktop-login`, so website deployments update
 the desktop UI automatically.
 
@@ -54,7 +54,8 @@ npm run dev:desktop
 ```
 
 The older local-packaged mode is still available if a standalone desktop bundle
-is needed:
+is needed. Use this when you want to install and test the current local
+`warptalk-web` UI before it has been deployed:
 
 ```bash
 npm run typecheck
@@ -63,11 +64,12 @@ npm run build:win
 
 `npm run build:win` builds `warptalk-web` first, copies the standalone Next.js
 output into Electron resources, and writes the Windows installer to `release/`.
+Because that installer contains `resources/warptalk-web/server.js`, the desktop
+runtime uses the packaged local UI automatically.
 
 If you intentionally need the older local-packaged production mode, copy
 `.env.production.example` to `.env.production.local`, fill the public LiveKit
-and Google values, build the local bundle, and launch it with
-`WARPTALK_DESKTOP_WEB_MODE=local`:
+and Google values, then run:
 
 ```bash
 npm run build:win:production

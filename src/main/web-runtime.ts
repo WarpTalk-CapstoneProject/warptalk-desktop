@@ -1,5 +1,6 @@
 import { app } from "electron";
 import { fork, type ChildProcess } from "child_process";
+import fs from "fs";
 import http from "http";
 import net from "net";
 import path from "path";
@@ -24,7 +25,12 @@ export class WebRuntimeService {
       return configuredWebUrl;
     }
 
-    if (process.env.WARPTALK_DESKTOP_WEB_MODE !== "local") {
+    const requestedMode = process.env.WARPTALK_DESKTOP_WEB_MODE?.trim();
+    const shouldUseLocalRuntime =
+      requestedMode === "local" ||
+      (requestedMode !== "remote" && this.hasStandaloneServer());
+
+    if (!shouldUseLocalRuntime) {
       return DEFAULT_REMOTE_PROD_URL;
     }
 
@@ -86,6 +92,10 @@ export class WebRuntimeService {
       "standalone",
       "server.js",
     );
+  }
+
+  private hasStandaloneServer(): boolean {
+    return fs.existsSync(this.resolveStandaloneServerPath());
   }
 }
 
