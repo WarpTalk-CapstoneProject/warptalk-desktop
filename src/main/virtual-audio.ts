@@ -18,7 +18,6 @@
  */
 
 import fs from "fs";
-import path from "path";
 
 /** Where macOS looks for audio HAL plug-ins. */
 const MAC_HAL_DIRECTORY = "/Library/Audio/Plug-Ins/HAL";
@@ -110,16 +109,23 @@ export function hasAnyVirtualDriver(): boolean {
   return readHalDirectory().length > 0;
 }
 
-/**
- * Path to the bundled BlackHole installer, or null when it was not packaged.
- *
- * Installing writes into /Library and therefore needs an administrator, which is why nothing here
- * runs it silently — the caller shows what is about to happen and why first.
- */
-export function bundledInstallerPath(resourcesPath: string, isPackaged: boolean): string | null {
-  const candidate = isPackaged
-    ? path.join(resourcesPath, "BlackHole.pkg")
-    : path.resolve(process.cwd(), "resources", "BlackHole.pkg");
+/** Where BlackHole is published. Its GitHub releases carry no installer package. */
+export const BLACKHOLE_DOWNLOAD_PAGE = "https://existential.audio/blackhole/";
 
-  return fs.existsSync(candidate) ? candidate : null;
+/**
+ * The Homebrew command that installs both legs.
+ *
+ * Offered as text to copy rather than run for us. The package writes into /Library and needs an
+ * administrator, and a GUI app that silently drives a privilege prompt the user did not initiate
+ * is indistinguishable from something they should refuse. Handing over the exact command keeps
+ * both the decision and the password with the person at the keyboard.
+ */
+export const BLACKHOLE_BREW_COMMAND =
+  "brew install --cask blackhole-2ch blackhole-16ch";
+
+/** Whether Homebrew is on this machine, so the UI can offer the command that will actually work. */
+export function hasHomebrew(): boolean {
+  return ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"].some((candidate) =>
+    fs.existsSync(candidate),
+  );
 }

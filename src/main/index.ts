@@ -5,6 +5,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   desktopCapturer,
   dialog,
   ipcMain,
@@ -20,7 +21,12 @@ import { spawn } from "child_process";
 import path from "path";
 
 import { AudioRuntimeService } from "./audio-runtime";
-import { bundledInstallerPath, detectVirtualAudio } from "./virtual-audio";
+import {
+  BLACKHOLE_BREW_COMMAND,
+  BLACKHOLE_DOWNLOAD_PAGE,
+  detectVirtualAudio,
+  hasHomebrew,
+} from "./virtual-audio";
 import { WebRuntimeService } from "./web-runtime";
 
 let mainWindow: BrowserWindow | null = null;
@@ -347,31 +353,38 @@ async function runVirtualAudioInstaller(): Promise<{ started: boolean; reason?: 
     return { started: false, reason: "unsupported-platform" };
   }
 
-  const installer = bundledInstallerPath(process.resourcesPath, app.isPackaged);
-  if (!installer) {
-    return { started: false, reason: "installer-not-bundled" };
-  }
+  const brew = hasHomebrew();
+  const buttons = brew
+    ? ["Copy the Homebrew command", "Open the download page", "Not now"]
+    : ["Open the download page", "Not now"];
 
   const { response } = await dialog.showMessageBox({
     type: "info",
-    message: "Install the WarpTalk audio bridge?",
+    message: "Install the audio bridge",
     detail:
-      "An external meeting needs a virtual audio device so Google Meet can send and receive " +
-      "translated audio. macOS will ask for your password, because the device is installed " +
-      "system-wide. You can remove it later from /Library/Audio/Plug-Ins/HAL.",
-    buttons: ["Open the installer", "Not now"],
-    cancelId: 1,
+      "An external meeting needs two virtual audio devices so Google Meet can send and receive " +
+      "translated audio. WarpTalk uses BlackHole, which is free and open source.\n\n" +
+      (brew ? `Homebrew is installed, so this one command sets both up:\n\n${BLACKHOLE_BREW_COMMAND}\n\n` : "") +
+      "It installs system-wide, so macOS will ask for your password and the devices appear " +
+      "after a restart. WarpTalk does not run the install itself — the password stays between " +
+      "you and macOS. To undo it later, remove the BlackHole entries from " +
+      "/Library/Audio/Plug-Ins/HAL.",
+    buttons,
+    cancelId: buttons.length - 1,
     defaultId: 0,
   });
 
-  if (response !== 0) {
+  if (response === buttons.length - 1) {
     return { started: false, reason: "declined" };
   }
 
-  // `shell.openPath` hands it to Installer.app, which owns the privilege prompt. Nothing here
-  // asks for or handles the password itself.
-  const failure = await shell.openPath(installer);
-  return failure ? { started: false, reason: failure } : { started: true };
+  if (brew && response === 0) {
+    clipboard.writeText(BLACKHOLE_BREW_COMMAND);
+    return { started: true, reason: "command-copied" };
+  }
+
+  openExternalUrl(BLACKHOLE_DOWNLOAD_PAGE);
+  return { started: true, reason: "download-page-opened" };
 }
 
 /**
