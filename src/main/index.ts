@@ -29,6 +29,12 @@ const GOOGLE_AUTH_HOSTS = new Set([
   "accounts.google.com",
   "oauth.googleusercontent.com",
 ]);
+// nativeImage only decodes .ico on Windows; macOS/Linux need the PNG or they
+// get an empty image (invisible tray, blank window icon).
+const APP_ICON_FILE =
+  process.platform === "win32"
+    ? "warptalk-logo-primary.ico"
+    : "warptalk-logo-primary.png";
 
 app.setName(APP_NAME);
 app.setAppUserModelId(APP_MODEL_ID);
@@ -93,13 +99,13 @@ function isDesktopLandingUrl(url: string, trustedOrigin: string): boolean {
 }
 
 async function createWindow(): Promise<void> {
-  mainWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 800,
     minHeight: 600,
     title: WINDOW_TITLE,
-    icon: getDesktopAssetPath("warptalk-logo-primary.ico"),
+    icon: getDesktopAssetPath(APP_ICON_FILE),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
@@ -108,85 +114,132 @@ async function createWindow(): Promise<void> {
       sandbox: true,
     },
   });
-  mainWindow.on("page-title-updated", (event) => {
+  mainWindow = win;
+
+  // Everything below must be wired before the first await: the user can close
+  // the window while the web UI is still loading, and a listener attached after
+  // that point never runs.
+  win.on("page-title-updated", (event) => {
     event.preventDefault();
-    mainWindow?.setTitle(WINDOW_TITLE);
+    win.setTitle(WINDOW_TITLE);
   });
 
-  const rendererUrl = await webRuntime.getRendererUrl();
-  const trustedOrigin = webRuntime.getTrustedOrigin(rendererUrl);
-  const desktopEntryUrl = webRuntime.getDesktopEntryUrl(rendererUrl);
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    const targetOrigin = getUrlOrigin(url);
-    if (targetOrigin === trustedOrigin) {
-      return { action: "allow" };
+  win.on("closed", () => {
+    if (mainWindow === win) {
+      mainWindow = null;
     }
-
-    if (shouldAllowAuthPopup(url)) {
-      return {
-        action: "allow",
-        overrideBrowserWindowOptions: {
-          width: 520,
-          height: 720,
-          autoHideMenuBar: true,
-          webPreferences: {
-            contextIsolation: true,
-            nodeIntegration: false,
-            sandbox: true,
-          },
-        },
-      };
-    }
-
-    openExternalUrl(url);
-    return { action: "deny" };
-  });
-
-  mainWindow.webContents.on("will-navigate", (event, url) => {
-    const targetOrigin = getUrlOrigin(url);
-    if (isDesktopLandingUrl(url, trustedOrigin)) {
-      event.preventDefault();
-      void mainWindow?.loadURL(desktopEntryUrl);
-      return;
-    }
-
-    if (!targetOrigin || targetOrigin === trustedOrigin) return;
-
-    event.preventDefault();
-    openExternalUrl(url);
-  });
-
-  mainWindow.webContents.on("did-navigate-in-page", (_event, url) => {
-    if (isDesktopLandingUrl(url, trustedOrigin)) {
-      void mainWindow?.loadURL(desktopEntryUrl);
-    }
-  });
-
-  await mainWindow.loadURL(desktopEntryUrl);
-
-  mainWindow.setMenuBarVisibility(false);
-  mainWindow.setAutoHideMenuBar(true);
-  mainWindow.setTitle(WINDOW_TITLE);
-
-  if (process.env.NODE_ENV === "development") {
-    mainWindow.webContents.openDevTools();
-  }
-
-  mainWindow.on("closed", () => {
-    mainWindow = null;
   });
 
   // Minimize to tray instead of closing
-  mainWindow.on("close", (event) => {
+  win.on("close", (event) => {
     if (tray) {
       event.preventDefault();
-      mainWindow?.hide();
+      win.hide();
     }
   });
+
+  win.setMenuBarVisibility(false);
+  win.setAutoHideMenuBar(true);
+  win.setTitle(WINDOW_TITLE);
+
+  if (process.env.NODE_ENV === "development") {
+    win.webContents.openDevTools();
+  }
+
+  try {
+    const rendererUrl = await webRuntime.getRendererUrl();
+    if (win.isDestroyed()) return;
+
+    const trustedOrigin = webRuntime.getTrustedOrigin(rendererUrl);
+    const desktopEntryUrl = webRuntime.getDesktopEntryUrl(rendererUrl);
+    const reloadDesktopEntry = (): void => {
+      void win.loadURL(desktopEntryUrl).catch((error) => {
+        console.error("Failed to reload the desktop entry route:", error);
+      });
+    };
+
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      const targetOrigin = getUrlOrigin(url);
+      if (targetOrigin === trustedOrigin) {
+        return { action: "allow" };
+      }
+
+      if (shouldAllowAuthPopup(url)) {
+        return {
+          action: "allow",
+          overrideBrowserWindowOptions: {
+            width: 520,
+            height: 720,
+            autoHideMenuBar: true,
+            webPreferences: {
+              contextIsolation: true,
+              nodeIntegration: false,
+              sandbox: true,
+            },
+          },
+        };
+      }
+
+      openExternalUrl(url);
+      return { action: "deny" };
+    });
+
+    win.webContents.on("will-navigate", (event, url) => {
+      const targetOrigin = getUrlOrigin(url);
+      if (isDesktopLandingUrl(url, trustedOrigin)) {
+        event.preventDefault();
+        reloadDesktopEntry();
+        return;
+      }
+
+      if (!targetOrigin || targetOrigin === trustedOrigin) return;
+
+      event.preventDefault();
+      openExternalUrl(url);
+    });
+
+    win.webContents.on("did-navigate-in-page", (_event, url) => {
+      if (isDesktopLandingUrl(url, trustedOrigin)) {
+        reloadDesktopEntry();
+      }
+    });
+
+    await win.loadURL(desktopEntryUrl);
+  } catch (error) {
+    // Offline, DNS failure, the deployed app being down, or the local web
+    // runtime failing to come up. Without this the window stays blank forever.
+    console.error("Failed to load the WarpTalk web UI:", error);
+    if (win.isDestroyed()) return;
+
+    try {
+      await win.loadFile(path.join(__dirname, "../renderer/index.html"));
+    } catch (fallbackError) {
+      console.error("Failed to load the fallback renderer:", fallbackError);
+    }
+  }
+}
+
+/**
+ * The preload bridge is exposed to remotely-hosted content, so any script on the
+ * deployed origin can reach `openExternal`. Without this check a `file://` URL
+ * would launch a local binary through ShellExecute, and a switch-shaped string
+ * would be handed to chrome.exe as an argument.
+ */
+function isSafeExternalUrl(url: string): boolean {
+  try {
+    const { protocol } = new URL(url);
+    return protocol === "https:" || protocol === "http:";
+  } catch {
+    return false;
+  }
 }
 
 function openExternalUrl(url: string): void {
+  if (!isSafeExternalUrl(url)) {
+    console.warn(`Blocked external URL with unsupported scheme: ${url}`);
+    return;
+  }
+
   if (process.platform === "win32") {
     const chromePaths = [
       path.join(
@@ -215,7 +268,8 @@ function openExternalUrl(url: string): void {
       (candidate) => candidate && fs.existsSync(candidate),
     );
     if (chromePath) {
-      const child = spawn(chromePath, [url], {
+      // "--" terminates switch parsing, so the URL can never be read as a flag.
+      const child = spawn(chromePath, ["--", url], {
         detached: true,
         stdio: "ignore",
         windowsHide: true,
@@ -229,9 +283,21 @@ function openExternalUrl(url: string): void {
 }
 
 function createTray(): void {
-  const icon = nativeImage.createFromPath(
-    getDesktopAssetPath("warptalk-logo-primary.ico"),
-  );
+  let icon = nativeImage.createFromPath(getDesktopAssetPath(APP_ICON_FILE));
+
+  // `close` hides the window whenever a tray exists, so an undecodable or
+  // missing icon would strand the window behind an invisible tray item.
+  if (icon.isEmpty()) {
+    console.error(
+      `Tray icon ${APP_ICON_FILE} could not be loaded; running without a tray.`,
+    );
+    return;
+  }
+
+  if (process.platform !== "win32") {
+    // The source PNG is 4096x4096; menu bars expect a ~16pt image.
+    icon = icon.resize({ width: 16, height: 16 });
+  }
 
   tray = new Tray(icon);
   tray.setToolTip(APP_NAME);
@@ -272,15 +338,21 @@ function createTray(): void {
   });
 }
 
+function launchWindow(): void {
+  void createWindow().catch((error) => {
+    console.error("Failed to create the main window:", error);
+  });
+}
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   registerIpcHandlers();
-  void createWindow();
+  launchWindow();
   createTray();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      void createWindow();
+      launchWindow();
     }
   });
 });

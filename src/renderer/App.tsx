@@ -8,7 +8,10 @@ export default function App(): JSX.Element {
       <div className="desktop-fallback-panel">
         <span className="desktop-fallback-mark">W</span>
         <h1>Warptalk-V1</h1>
-        <p>Dang mo giao dien Warptalk Web trong ung dung desktop...</p>
+        <p>
+          Không kết nối được tới giao diện Warptalk Web. Kiểm tra kết nối mạng
+          rồi mở lại ứng dụng.
+        </p>
       </div>
     </main>
   );
