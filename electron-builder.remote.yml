@@ -11,6 +11,8 @@ extraResources:
     to: warptalk-logo-primary.ico
   - from: resources/warptalk-logo-primary.png
     to: warptalk-logo-primary.png
+  - from: resources/warptalk-tray.png
+    to: warptalk-tray.png
 
 mac:
   icon: resources/warptalk-logo-primary.png
