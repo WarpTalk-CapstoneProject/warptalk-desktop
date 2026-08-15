@@ -5,10 +5,14 @@
 import {
   app,
   BrowserWindow,
+  desktopCapturer,
+  dialog,
   ipcMain,
   Menu,
   nativeImage,
+  session,
   shell,
+  systemPreferences,
   Tray,
 } from "electron";
 import fs from "fs";
@@ -348,6 +352,73 @@ function launchWindow(): void {
 }
 
 /**
+ * Without this handler Chromium rejects `getDisplayMedia` with
+ * "NotSupportedError: Not supported", so the meeting control bar's Present
+ * button does nothing. Electron 28 has no `useSystemPicker`, so the source has
+ * to be chosen here.
+ */
+function registerDisplayMediaHandler(): void {
+  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+    void (async () => {
+      // macOS refuses to enumerate screens until Screen Recording is granted,
+      // and cannot be prompted from here — the first capture attempt is what
+      // makes the entry appear in System Settings.
+      if (
+        process.platform === "darwin" &&
+        systemPreferences.getMediaAccessStatus("screen") !== "granted"
+      ) {
+        console.warn("Screen recording permission has not been granted yet.");
+      }
+
+      let sources;
+      try {
+        sources = await desktopCapturer.getSources({
+          types: ["screen"],
+          thumbnailSize: { width: 0, height: 0 },
+        });
+      } catch (error) {
+        console.error("Could not enumerate screen sources:", error);
+        callback({});
+        return;
+      }
+
+      if (sources.length === 0) {
+        await dialog.showMessageBox({
+          type: "warning",
+          message: "Screen sharing is unavailable",
+          detail:
+            process.platform === "darwin"
+              ? `Grant ${APP_NAME} the Screen Recording permission in System Settings > Privacy & Security, then try again.`
+              : "No screen could be captured.",
+        });
+        callback({});
+        return;
+      }
+
+      if (sources.length === 1) {
+        callback({ video: sources[0] });
+        return;
+      }
+
+      const { response } = await dialog.showMessageBox({
+        type: "question",
+        message: "Share which screen?",
+        buttons: [...sources.map((source) => source.name), "Cancel"],
+        cancelId: sources.length,
+        defaultId: 0,
+      });
+
+      if (response >= sources.length) {
+        callback({});
+        return;
+      }
+
+      callback({ video: sources[response] });
+    })();
+  });
+}
+
+/**
  * On macOS the standard editing shortcuts (Cmd+C/V/X/A) and Cmd+Q are provided
  * by roles in the application menu, so dropping the menu entirely would take
  * them with it. The window itself is chromeless on every platform: Windows and
@@ -368,25 +439,46 @@ function applyApplicationMenu(): void {
   );
 }
 
-app.whenReady().then(() => {
-  applyApplicationMenu();
-  registerIpcHandlers();
-  launchWindow();
-  createTray();
+function revealMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    launchWindow();
+    return;
+  }
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      launchWindow();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+// A second copy would run its own tray and, in local-packaged mode, fork a
+// second Next server on another port. Hand the launch to the running instance
+// instead. Must be claimed before `whenReady` so the loser exits early.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", revealMainWindow);
+
+  app.whenReady().then(() => {
+    applyApplicationMenu();
+    registerIpcHandlers();
+    registerDisplayMediaHandler();
+    launchWindow();
+    createTray();
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        launchWindow();
+      }
+    });
+  });
+
+  app.on("before-quit", () => {
+    webRuntime.stop();
+  });
+
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") {
+      app.quit();
     }
   });
-});
-
-app.on("before-quit", () => {
-  webRuntime.stop();
-});
-
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
-});
+}
