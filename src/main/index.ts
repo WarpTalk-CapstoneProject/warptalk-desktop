@@ -35,6 +35,9 @@ const APP_ICON_FILE =
   process.platform === "win32"
     ? "warptalk-logo-primary.ico"
     : "warptalk-logo-primary.png";
+// The app icon is a black square, which would disappear against a dark menu
+// bar, so the tray gets the mark on a transparent background instead.
+const TRAY_ICON_FILE = "warptalk-tray.png";
 
 app.setName(APP_NAME);
 app.setAppUserModelId(APP_MODEL_ID);
@@ -283,21 +286,21 @@ function openExternalUrl(url: string): void {
 }
 
 function createTray(): void {
-  let icon = nativeImage.createFromPath(getDesktopAssetPath(APP_ICON_FILE));
+  let icon = nativeImage.createFromPath(getDesktopAssetPath(TRAY_ICON_FILE));
 
   // `close` hides the window whenever a tray exists, so an undecodable or
   // missing icon would strand the window behind an invisible tray item.
   if (icon.isEmpty()) {
     console.error(
-      `Tray icon ${APP_ICON_FILE} could not be loaded; running without a tray.`,
+      `Tray icon ${TRAY_ICON_FILE} could not be loaded; running without a tray.`,
     );
     return;
   }
 
-  if (process.platform !== "win32") {
-    // The source PNG is 4096x4096; menu bars expect a ~16pt image.
-    icon = icon.resize({ width: 16, height: 16 });
-  }
+  // The asset ships at 64px; menu bars want ~16pt and the Windows notification
+  // area ~32px at the DPI scales it actually runs at.
+  const traySize = process.platform === "darwin" ? 16 : 32;
+  icon = icon.resize({ width: traySize, height: traySize });
 
   tray = new Tray(icon);
   tray.setToolTip(APP_NAME);

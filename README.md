@@ -46,12 +46,55 @@ This remote build does not package the Next.js standalone output. The installed 
 opens `https://app.warptalk.io.vn/desktop-login`, so website deployments update
 the desktop UI automatically.
 
-To point a development desktop window at another web URL:
+To point a development desktop window at another web URL, on PowerShell:
 
-```bash
+```powershell
 $env:WARPTALK_WEB_URL="https://app.warptalk.io.vn/desktop-login"
 npm run dev:desktop
 ```
+
+or on macOS and Linux:
+
+```bash
+WARPTALK_WEB_URL="https://app.warptalk.io.vn/desktop-login" npm run dev:desktop
+```
+
+### macOS
+
+```bash
+npm run typecheck
+npm run build:mac:remote
+```
+
+This writes four artifacts to `release/`, because `macos-latest` runners are
+Apple Silicon and a host-arch-only build produces a `.dmg` that refuses to
+launch on Intel Macs:
+
+| File | Runs on |
+|------|---------|
+| `Warptalk-V1-<version>-arm64.dmg` / `-arm64-mac.zip` | Apple Silicon |
+| `Warptalk-V1-<version>.dmg` / `-mac.zip` | Intel |
+
+The `.zip` pair is what `electron-updater` consumes; the `.dmg` pair is what the
+download page links.
+
+**Gatekeeper.** Until `MAC_CERTIFICATE_P12` is added as a repo secret the builds
+are unsigned and unnotarized, and macOS reports that fresh downloads are
+"damaged and can't be opened" rather than offering the older "open anyway"
+escape hatch. To run such a build locally, strip the quarantine attribute:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Warptalk-V1.app
+```
+
+Do not put that command next to a public download button — it teaches users to
+disarm Gatekeeper. It is a workaround for the team until the app is signed and
+notarized.
+
+Note that a local build on a machine with a Developer ID in its keychain is
+signed with that identity, so it will behave differently from the unsigned
+artifacts CI produces. Test the CI artifacts, not a local build, when checking
+the download experience.
 
 The older local-packaged mode is still available if a standalone desktop bundle
 is needed. Use this when you want to install and test the current local
