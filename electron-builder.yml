@@ -1,5 +1,5 @@
 appId: com.warptalk.desktop
-productName: Warptalk-V1
+productName: WarpTalk
 copyright: Copyright (c) 2026 WarpTalk Team
 
 directories:
@@ -19,6 +19,10 @@ extraResources:
     to: warptalk-logo-primary.png
   - from: resources/warptalk-tray.png
     to: warptalk-tray.png
+  - from: resources/warptalk-tray-template.png
+    to: warptalk-tray-template.png
+  - from: resources/warptalk-tray-template@2x.png
+    to: warptalk-tray-template@2x.png
 
 mac:
   icon: resources/warptalk-logo-primary.png
@@ -51,7 +55,7 @@ win:
 nsis:
   installerIcon: resources/warptalk-logo-primary.ico
   uninstallerIcon: resources/warptalk-logo-primary.ico
-  shortcutName: Warptalk-V1
+  shortcutName: WarpTalk
 
 linux:
   icon: resources/warptalk-logo-primary.png
