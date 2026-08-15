@@ -3,7 +3,9 @@
   "version": "0.2.1",
   "description": "Warptalk-V1 - Cross-platform real-time translation client",
   "main": "out/main/index.js",
-  "author": "WarpTalk Team",
+  "author": {
+    "name": "WarpTalk Team"
+  },
   "license": "MIT",
   "scripts": {
     "dev": "concurrently -k -s first -n web,electron \"npm --prefix ../warptalk-web run dev\" \"wait-on http://localhost:3000/desktop-login && electron-vite dev\"",

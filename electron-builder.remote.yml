@@ -6,8 +6,6 @@ directories:
   output: release
   buildResources: resources
 
-afterPack: scripts/after-pack.js
-
 extraResources:
   - from: resources/warptalk-logo-primary.ico
     to: warptalk-logo-primary.ico
@@ -22,7 +20,6 @@ mac:
   hardenedRuntime: true
 
 win:
-  signAndEditExecutable: false
   icon: resources/warptalk-logo-primary.ico
   target:
     - nsis
