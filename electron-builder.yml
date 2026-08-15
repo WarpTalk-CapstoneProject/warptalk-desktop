@@ -23,6 +23,12 @@ extraResources:
 mac:
   icon: resources/warptalk-logo-primary.png
   category: public.app-category.productivity
+  # electron-builder supplies the microphone and camera strings by default but
+  # not this one, and macOS refuses to capture a screen without it.
+  extendInfo:
+    NSScreenCaptureUsageDescription: >-
+      Warptalk needs to record the screen so you can present it to the other
+      people in a meeting.
   # macos-latest runners are Apple Silicon, so building the host arch alone
   # would ship a dmg that refuses to launch on every Intel Mac.
   target:
