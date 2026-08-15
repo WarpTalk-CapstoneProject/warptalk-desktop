@@ -20,10 +20,18 @@ import { spawn } from "child_process";
 import path from "path";
 
 import { AudioRuntimeService } from "./audio-runtime";
+import { bundledInstallerPath, detectVirtualAudio } from "./virtual-audio";
 import { WebRuntimeService } from "./web-runtime";
 
 let mainWindow: BrowserWindow | null = null;
+let transcriptWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+/**
+ * Where the web UI is being served from, captured once the main window has resolved it. The
+ * transcript popup needs the same origin and must not resolve it a second time: in local-packaged
+ * mode that would fork a second Next server.
+ */
+let resolvedWebOrigin: string | null = null;
 const audioRuntime = new AudioRuntimeService();
 const webRuntime = new WebRuntimeService();
 const APP_NAME = "WarpTalk";
@@ -67,6 +75,17 @@ function registerIpcHandlers(): void {
   ipcMain.handle("audio:stop-capture", async () => undefined);
   ipcMain.handle("translationRoom:join", async () => undefined);
   ipcMain.handle("translationRoom:leave", async () => undefined);
+
+  // External-bridge meetings: which virtual audio devices exist, and a window that shows the
+  // transcript while the user is looking at Google Meet rather than at WarpTalk.
+  ipcMain.handle("bridge:virtual-audio-status", () => detectVirtualAudio());
+  ipcMain.handle("bridge:install-virtual-audio", () => runVirtualAudioInstaller());
+  ipcMain.handle("bridge:open-transcript-window", async (_event, roomId: string) => {
+    await openTranscriptWindow(roomId);
+  });
+  ipcMain.handle("bridge:close-transcript-window", () => {
+    transcriptWindow?.close();
+  });
 
   ipcMain.on("window:minimize", () => mainWindow?.minimize());
   ipcMain.on("window:maximize", () => {
@@ -164,6 +183,7 @@ async function createWindow(): Promise<void> {
 
     const trustedOrigin = webRuntime.getTrustedOrigin(rendererUrl);
     const desktopEntryUrl = webRuntime.getDesktopEntryUrl(rendererUrl);
+    resolvedWebOrigin = trustedOrigin;
     const reloadDesktopEntry = (): void => {
       void win.loadURL(desktopEntryUrl).catch((error) => {
         console.error("Failed to reload the desktop entry route:", error);
@@ -229,6 +249,129 @@ async function createWindow(): Promise<void> {
       console.error("Failed to load the fallback renderer:", fallbackError);
     }
   }
+}
+
+/** The compact transcript view the popup shows. Served by the web app, not by the local renderer. */
+const TRANSCRIPT_ROUTE = "/desktop-transcript";
+
+/**
+ * A second, small, always-on-top window carrying the live transcript.
+ *
+ * It exists because an external-bridge meeting is one the user is watching in Google Meet, not in
+ * WarpTalk — the main window is behind their browser the whole time, so a transcript inside it is
+ * a transcript nobody reads.
+ *
+ * Follows the main window's construction order deliberately: every listener is attached before the
+ * first await, and the load is wrapped, because a window whose `closed` handler was registered
+ * after an await leaves a destroyed object behind for the next caller to touch.
+ */
+async function openTranscriptWindow(roomId: string): Promise<void> {
+  if (transcriptWindow && !transcriptWindow.isDestroyed()) {
+    if (transcriptWindow.isMinimized()) transcriptWindow.restore();
+    transcriptWindow.show();
+    transcriptWindow.focus();
+    return;
+  }
+
+  if (!resolvedWebOrigin) {
+    console.error("Cannot open the transcript window before the web UI has loaded.");
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: 460,
+    height: 620,
+    minWidth: 320,
+    minHeight: 240,
+    title: WINDOW_TITLE,
+    alwaysOnTop: true,
+    autoHideMenuBar: true,
+    // Small and unobtrusive: it sits over a browser window for the whole meeting.
+    skipTaskbar: false,
+    webPreferences: {
+      preload: path.join(__dirname, "../preload/index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  transcriptWindow = win;
+
+  win.on("closed", () => {
+    if (transcriptWindow === win) {
+      transcriptWindow = null;
+    }
+  });
+
+  // Unlike the main window, closing this one really closes it — it is a panel the user dismisses,
+  // not the application.
+  win.setMenuBarVisibility(false);
+
+  // Same containment as the main window: a link in a transcript must not navigate the panel to
+  // some other site, and popups from it go to the browser.
+  const popupOrigin = resolvedWebOrigin;
+  win.webContents.on("will-navigate", (event, url) => {
+    if (getUrlOrigin(url) === popupOrigin) return;
+    event.preventDefault();
+    openExternalUrl(url);
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalUrl(url);
+    return { action: "deny" };
+  });
+
+  const target = `${resolvedWebOrigin}${TRANSCRIPT_ROUTE}/${encodeURIComponent(roomId)}`;
+
+  try {
+    await win.loadURL(target);
+  } catch (error) {
+    console.error("Failed to load the transcript view:", error);
+    if (win.isDestroyed()) return;
+    try {
+      await win.loadFile(path.join(__dirname, "../renderer/index.html"));
+    } catch (fallbackError) {
+      console.error("Failed to load the fallback renderer:", fallbackError);
+    }
+  }
+}
+
+/**
+ * Hands the bundled virtual-audio installer to the OS installer UI.
+ *
+ * Deliberately not silent. It writes into /Library and needs an administrator, so the user is told
+ * what is about to run and what it is for before any password prompt appears — a password box that
+ * arrives unexplained is one people are right to refuse.
+ */
+async function runVirtualAudioInstaller(): Promise<{ started: boolean; reason?: string }> {
+  if (process.platform !== "darwin") {
+    return { started: false, reason: "unsupported-platform" };
+  }
+
+  const installer = bundledInstallerPath(process.resourcesPath, app.isPackaged);
+  if (!installer) {
+    return { started: false, reason: "installer-not-bundled" };
+  }
+
+  const { response } = await dialog.showMessageBox({
+    type: "info",
+    message: "Install the WarpTalk audio bridge?",
+    detail:
+      "An external meeting needs a virtual audio device so Google Meet can send and receive " +
+      "translated audio. macOS will ask for your password, because the device is installed " +
+      "system-wide. You can remove it later from /Library/Audio/Plug-Ins/HAL.",
+    buttons: ["Open the installer", "Not now"],
+    cancelId: 1,
+    defaultId: 0,
+  });
+
+  if (response !== 0) {
+    return { started: false, reason: "declined" };
+  }
+
+  // `shell.openPath` hands it to Installer.app, which owns the privilege prompt. Nothing here
+  // asks for or handles the password itself.
+  const failure = await shell.openPath(installer);
+  return failure ? { started: false, reason: failure } : { started: true };
 }
 
 /**
