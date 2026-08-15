@@ -344,8 +344,29 @@ function launchWindow(): void {
   });
 }
 
+/**
+ * On macOS the standard editing shortcuts (Cmd+C/V/X/A) and Cmd+Q are provided
+ * by roles in the application menu, so dropping the menu entirely would take
+ * them with it. The window itself is chromeless on every platform: Windows and
+ * Linux hide the menu bar via `autoHideMenuBar` + `setMenuBarVisibility(false)`.
+ */
+function applyApplicationMenu(): void {
+  if (process.platform !== "darwin") {
+    Menu.setApplicationMenu(null);
+    return;
+  }
+
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: "appMenu" },
+      { role: "editMenu" },
+      { role: "windowMenu" },
+    ]),
+  );
+}
+
 app.whenReady().then(() => {
-  Menu.setApplicationMenu(null);
+  applyApplicationMenu();
   registerIpcHandlers();
   launchWindow();
   createTray();

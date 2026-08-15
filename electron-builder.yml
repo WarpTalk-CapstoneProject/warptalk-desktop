@@ -6,8 +6,6 @@ directories:
   output: release
   buildResources: resources
 
-afterPack: scripts/after-pack.js
-
 extraResources:
   - from: ../warptalk-web/.next/standalone
     to: warptalk-web
@@ -28,7 +26,6 @@ mac:
   hardenedRuntime: true
 
 win:
-  signAndEditExecutable: false
   icon: resources/warptalk-logo-primary.ico
   target:
     - nsis
