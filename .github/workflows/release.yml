@@ -30,13 +30,13 @@ jobs:
         include:
           - os: macos-latest
             name: macOS
-            build: npm run build:mac
+            build: npm run build:mac:remote
           - os: windows-latest
             name: Windows
-            build: npm run build:win
+            build: npm run build:win:remote
           - os: ubuntu-latest
             name: Linux
-            build: npm run build:linux
+            build: npm run build:linux:remote
 
     steps:
       - uses: actions/checkout@v4

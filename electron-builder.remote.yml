@@ -9,12 +9,6 @@ directories:
 afterPack: scripts/after-pack.js
 
 extraResources:
-  - from: ../warptalk-web/.next/standalone
-    to: warptalk-web
-  - from: ../warptalk-web/.next/static
-    to: warptalk-web/.next/static
-  - from: ../warptalk-web/public
-    to: warptalk-web/public
   - from: resources/warptalk-logo-primary.ico
     to: warptalk-logo-primary.ico
   - from: resources/warptalk-logo-primary.png
