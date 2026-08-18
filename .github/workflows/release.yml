@@ -54,14 +54,58 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # Code signing is opt-in, and the certificates are not bought yet.
+      #
+      # These used to be listed directly in the build step's `env:`, on the assumption that an
+      # unset secret would leave electron-builder unsigned. It does not. An unset secret expands
+      # to the EMPTY STRING, and an empty CSC_LINK is still a *set* variable, so electron-builder
+      # treats "" as a certificate path and fails:
+      #
+      #     ⨯ Env WIN_CSC_LINK is not correct, cannot resolve: D:\a\warptalk-desktop not a file
+      #
+      # There is no way to conditionally omit a key from a YAML `env:` block, so the variables are
+      # exported here instead and only when they carry something. Values go through $GITHUB_ENV
+      # rather than being echoed; the delimiter form is used because a PEM-style secret is
+      # multi-line and would otherwise truncate at the first newline.
+      - name: Enable code signing when certificates are configured
+        shell: bash
+        env:
+          MAC_CERT: ${{ secrets.MAC_CERTIFICATE_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          WIN_CERT: ${{ secrets.WIN_CERTIFICATE_PFX }}
+          WIN_CERT_PASSWORD: ${{ secrets.WIN_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          export_secret() {
+            local name="$1" value="$2"
+            printf '%s<<__WARPTALK_EOF__\n%s\n__WARPTALK_EOF__\n' "$name" "$value" >> "$GITHUB_ENV"
+          }
+
+          if [ -n "$MAC_CERT" ]; then
+            export_secret CSC_LINK "$MAC_CERT"
+            export_secret CSC_KEY_PASSWORD "$MAC_CERT_PASSWORD"
+            echo "macOS: signing with the configured certificate."
+          else
+            # Without this electron-builder searches the runner keychain, finds nothing, and logs a
+            # warning that reads like a failure. Saying "do not look" makes the unsigned build a
+            # stated choice rather than an accident.
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+            echo "macOS: no certificate configured, building UNSIGNED. Gatekeeper will report"
+            echo "        downloads as damaged until MAC_CERTIFICATE_P12 is added."
+          fi
+
+          if [ -n "$WIN_CERT" ]; then
+            export_secret WIN_CSC_LINK "$WIN_CERT"
+            export_secret WIN_CSC_KEY_PASSWORD "$WIN_CERT_PASSWORD"
+            echo "Windows: signing with the configured certificate."
+          else
+            echo "Windows: no certificate configured, building UNSIGNED. SmartScreen will warn"
+            echo "         until WIN_CERTIFICATE_PFX is added."
+          fi
+
       - name: Build and publish
         run: ${{ matrix.build }} -- --publish always
         env:
           # electron-builder reads this to create/update the GitHub Release named after the tag.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Code signing. Left unset until the team buys certificates: electron-builder then
-          # produces unsigned builds rather than failing, which is what we want for now.
-          CSC_LINK: ${{ secrets.MAC_CERTIFICATE_P12 }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
-          WIN_CSC_LINK: ${{ secrets.WIN_CERTIFICATE_PFX }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CERTIFICATE_PASSWORD }}

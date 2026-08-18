@@ -147,7 +147,20 @@ Requirements for it to succeed:
   in to GitHub. If the repo has to stay private, mirror the artifacts to R2 and
   point the web app at a manifest instead. See `DESKTOP_RELEASE_MANIFEST_URL`
   in `warptalk-web/src/lib/desktop-releases.server.ts`.
-- **`package-lock.json` must be committed** because the workflow uses `npm ci`.
+- **`package-lock.json` must be committed** because the workflow uses `npm ci`,
+  **and it must carry every platform's native binaries.** Rollup, which
+  electron-vite builds on, ships its compiled core as one optional dependency per
+  platform. npm records only the ones the generating machine needed, so a lockfile
+  refreshed on Windows contains no `@rollup/rollup-darwin-arm64` and the macOS and
+  Linux jobs both die with `Cannot find module`. That is exactly what happened on
+  the first attempt at v0.3.0. Regenerate with `npm install --package-lock-only`
+  and check the result covers all three before committing:
+
+  ```bash
+  grep -c 'node_modules/@rollup/rollup-' package-lock.json
+  ```
+
+  Twenty-five entries is right; two means the file is platform-local.
 - **`src/renderer/index.html` must exist.** electron-vite infers its config
   from the `src/main` + `src/preload` + `src/renderer/index.html` layout.
 - `npm run typecheck` must pass; it gates the build.
@@ -155,6 +168,12 @@ Requirements for it to succeed:
 Builds are **unsigned** until `MAC_CERTIFICATE_P12` / `WIN_CERTIFICATE_PFX` are
 added as repo secrets. Unsigned builds still install, but macOS Gatekeeper and
 Windows SmartScreen show warnings.
+
+The workflow exports the signing variables only when the corresponding secret is
+non-empty. This is not tidiness: an absent secret expands to the empty string, and
+an empty `WIN_CSC_LINK` is still *set*, so electron-builder reads `""` as a
+certificate path and fails the job outright rather than falling back to an
+unsigned build. Do not move these back into the build step's `env:` block.
 
 ## Project Structure
 
