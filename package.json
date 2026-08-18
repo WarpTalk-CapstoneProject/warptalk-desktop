@@ -4,7 +4,8 @@
   "description": "WarpTalk - Cross-platform real-time translation client",
   "main": "out/main/index.js",
   "author": {
-    "name": "WarpTalk Team"
+    "name": "WarpTalk Team",
+    "email": "noreply@warptalk.vn"
   },
   "license": "MIT",
   "scripts": {
