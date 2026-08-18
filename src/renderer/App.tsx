@@ -1,40 +1,18 @@
-/**
- * WarpTalk Desktop — React App Entry Point
- */
+import type { JSX } from "react";
 
-import React from "react";
+import "./styles.css";
 
-export default function App(): React.JSX.Element {
+export default function App(): JSX.Element {
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        height: "100vh",
-        background: "linear-gradient(135deg, #0f0c29, #302b63, #24243e)",
-        color: "#ffffff",
-        fontFamily: "'Inter', -apple-system, sans-serif",
-      }}
-    >
-      <h1 style={{ fontSize: "2.5rem", marginBottom: "0.5rem" }}>
-        🎙️ WarpTalk Desktop
-      </h1>
-      <p style={{ opacity: 0.7, fontSize: "1.1rem" }}>
-        Real-time translation — desktop client
-      </p>
-      <div
-        style={{
-          marginTop: "2rem",
-          padding: "1rem 2rem",
-          borderRadius: "12px",
-          background: "rgba(255,255,255,0.1)",
-          backdropFilter: "blur(10px)",
-        }}
-      >
-        <p>🚧 Under Construction — Workers & UI coming soon</p>
+    <main className="desktop-fallback">
+      <div className="desktop-fallback-panel">
+        <span className="desktop-fallback-mark">W</span>
+        <h1>WarpTalk</h1>
+        <p>
+          Không kết nối được tới giao diện Warptalk Web. Kiểm tra kết nối mạng
+          rồi mở lại ứng dụng.
+        </p>
       </div>
-    </div>
+    </main>
   );
 }

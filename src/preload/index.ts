@@ -1,32 +1,33 @@
 /**
- * WarpTalk Desktop — Preload Script (Security Bridge)
+ * WarpTalk Desktop - Preload Script (Security Bridge)
  *
  * Exposes a safe API from main process to renderer via contextBridge.
  */
 
 import { contextBridge, ipcRenderer } from "electron";
 
-import type { DesktopRuntimeCapability } from "../shared/types";
+import type {
+  DesktopRuntimeCapability,
+  VirtualAudioInstallResult,
+  VirtualAudioStatus,
+} from "../shared/types";
 
 contextBridge.exposeInMainWorld("warptalk", {
-  // ── App Info ─────────────────────────────────────────────────────
   getVersion: (): Promise<string> => ipcRenderer.invoke("app:version"),
   getPlatform: (): string => process.platform,
   getRuntimeCapability: (): Promise<DesktopRuntimeCapability> =>
     ipcRenderer.invoke("runtime:capability"),
 
-  // ── Audio ────────────────────────────────────────────────────────
   startAudioCapture: (): Promise<void> =>
     ipcRenderer.invoke("audio:start-capture"),
   stopAudioCapture: (): Promise<void> =>
     ipcRenderer.invoke("audio:stop-capture"),
 
-  // ── TranslationRoom ──────────────────────────────────────────────────────
   joinTranslationRoom: (translationRoomId: string): Promise<void> =>
     ipcRenderer.invoke("translationRoom:join", translationRoomId),
-  leaveTranslationRoom: (): Promise<void> => ipcRenderer.invoke("translationRoom:leave"),
+  leaveTranslationRoom: (): Promise<void> =>
+    ipcRenderer.invoke("translationRoom:leave"),
 
-  // ── Events (main → renderer) ─────────────────────────────────────
   onTranscript: (callback: (data: unknown) => void): void => {
     ipcRenderer.on("transcript:update", (_event, data) => callback(data));
   },
@@ -37,7 +38,18 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.on("connection:status", (_event, status) => callback(status));
   },
 
-  // ── Window Control ───────────────────────────────────────────────
+  openExternal: (url: string): Promise<void> =>
+    ipcRenderer.invoke("app:open-external", url),
+
+  getVirtualAudioStatus: (): Promise<VirtualAudioStatus> =>
+    ipcRenderer.invoke("bridge:virtual-audio-status"),
+  installVirtualAudio: (): Promise<VirtualAudioInstallResult> =>
+    ipcRenderer.invoke("bridge:install-virtual-audio"),
+  openTranscriptWindow: (roomId: string): Promise<void> =>
+    ipcRenderer.invoke("bridge:open-transcript-window", roomId),
+  closeTranscriptWindow: (): Promise<void> =>
+    ipcRenderer.invoke("bridge:close-transcript-window"),
+
   minimize: (): void => ipcRenderer.send("window:minimize"),
   maximize: (): void => ipcRenderer.send("window:maximize"),
   close: (): void => ipcRenderer.send("window:close"),

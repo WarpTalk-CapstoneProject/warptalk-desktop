@@ -14,9 +14,43 @@ export interface WarpTalkAPI {
   onTranscript: (callback: (data: TranscriptUpdate) => void) => void;
   onTranslation: (callback: (data: TranslationUpdate) => void) => void;
   onConnectionStatus: (callback: (status: ConnectionStatus) => void) => void;
+  openExternal: (url: string) => Promise<void>;
+  getVirtualAudioStatus: () => Promise<VirtualAudioStatus>;
+  installVirtualAudio: () => Promise<VirtualAudioInstallResult>;
+  openTranscriptWindow: (roomId: string) => Promise<void>;
+  closeTranscriptWindow: () => Promise<void>;
   minimize: () => void;
   maximize: () => void;
   close: () => void;
+}
+
+/**
+ * An EXTERNAL_BRIDGE meeting runs on two independent virtual audio devices: one WarpTalk writes
+ * the dubbed voice into and Google Meet reads as its microphone, one Meet writes its output into
+ * and WarpTalk reads. A single device cannot serve both — it would feed the user's own dubbed
+ * voice back into the pipeline.
+ */
+export interface VirtualAudioDevice {
+  leg: "outbound" | "inbound";
+  driverBundle: string;
+  /** What to look for in Google Meet's device picker. */
+  deviceName: string;
+  installed: boolean;
+}
+
+export interface VirtualAudioStatus {
+  platform: string;
+  /** False where detection is not implemented, so an empty list is never mistaken for "nothing installed". */
+  supported: boolean;
+  devices: VirtualAudioDevice[];
+  ready: boolean;
+  /** Virtual drivers belonging to other applications, surfaced for support rather than used. */
+  foreignDrivers: string[];
+}
+
+export interface VirtualAudioInstallResult {
+  started: boolean;
+  reason?: string;
 }
 
 export interface DesktopRuntimeCapability {
