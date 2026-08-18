@@ -164,6 +164,17 @@ Requirements for it to succeed:
 - **`src/renderer/index.html` must exist.** electron-vite infers its config
   from the `src/main` + `src/preload` + `src/renderer/index.html` layout.
 - `npm run typecheck` must pass; it gates the build.
+- **The release must not be left as a draft.** electron-builder publishes a draft
+  by default, and a draft is invisible to `GET /releases/latest` — the endpoint the
+  download page calls — so the page keeps saying "coming soon" after a fully green
+  build. Both electron-builder configs set `publish.releaseType: release`; do not
+  remove it. To check a release actually went public:
+
+  ```bash
+  gh api repos/WarpTalk-CapstoneProject/warptalk-desktop/releases/latest --jq .tag_name
+  ```
+
+  A 404 there means every release is still a draft.
 
 Builds are **unsigned** until `MAC_CERTIFICATE_P12` / `WIN_CERTIFICATE_PFX` are
 added as repo secrets. Unsigned builds still install, but macOS Gatekeeper and

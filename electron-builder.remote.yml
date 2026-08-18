@@ -62,3 +62,8 @@ publish:
   provider: github
   owner: WarpTalk-CapstoneProject
   repo: warptalk-desktop
+  # electron-builder defaults to a DRAFT release. A draft is invisible to
+  # GET /releases/latest (it 404s) and its asset URLs are not publicly
+  # downloadable, so warptalk.vn/download — which reads exactly that endpoint —
+  # would keep saying "coming soon" after a fully green build. Publish outright.
+  releaseType: release
