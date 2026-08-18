@@ -72,8 +72,8 @@ launch on Intel Macs:
 
 | File | Runs on |
 |------|---------|
-| `Warptalk-V1-<version>-arm64.dmg` / `-arm64-mac.zip` | Apple Silicon |
-| `Warptalk-V1-<version>.dmg` / `-mac.zip` | Intel |
+| `WarpTalk-<version>-arm64.dmg` / `-arm64-mac.zip` | Apple Silicon |
+| `WarpTalk-<version>.dmg` / `-mac.zip` | Intel |
 
 The `.zip` pair is what `electron-updater` consumes; the `.dmg` pair is what the
 download page links.
@@ -84,7 +84,7 @@ are unsigned and unnotarized, and macOS reports that fresh downloads are
 escape hatch. To run such a build locally, strip the quarantine attribute:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/Warptalk-V1.app
+xattr -dr com.apple.quarantine /Applications/WarpTalk.app
 ```
 
 Do not put that command next to a public download button — it teaches users to

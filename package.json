@@ -1,7 +1,7 @@
 {
   "name": "warptalk-desktop",
   "version": "0.2.1",
-  "description": "Warptalk-V1 - Cross-platform real-time translation client",
+  "description": "WarpTalk - Cross-platform real-time translation client",
   "main": "out/main/index.js",
   "author": {
     "name": "WarpTalk Team"

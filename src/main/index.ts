@@ -26,7 +26,7 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 const audioRuntime = new AudioRuntimeService();
 const webRuntime = new WebRuntimeService();
-const APP_NAME = "Warptalk-V1";
+const APP_NAME = "WarpTalk";
 const APP_MODEL_ID = "com.warptalk.desktop";
 const WINDOW_TITLE = "";
 const GOOGLE_AUTH_HOSTS = new Set([
@@ -40,8 +40,13 @@ const APP_ICON_FILE =
     ? "warptalk-logo-primary.ico"
     : "warptalk-logo-primary.png";
 // The app icon is a black square, which would disappear against a dark menu
-// bar, so the tray gets the mark on a transparent background instead.
-const TRAY_ICON_FILE = "warptalk-tray.png";
+// bar, so the tray gets the mark on a transparent background instead. macOS
+// takes a monochrome template image and inverts it per menu bar appearance;
+// Windows and Linux have no such concept and get the colour mark.
+const TRAY_ICON_FILE =
+  process.platform === "darwin"
+    ? "warptalk-tray-template.png"
+    : "warptalk-tray.png";
 
 app.setName(APP_NAME);
 app.setAppUserModelId(APP_MODEL_ID);
@@ -301,10 +306,15 @@ function createTray(): void {
     return;
   }
 
-  // The asset ships at 64px; menu bars want ~16pt and the Windows notification
-  // area ~32px at the DPI scales it actually runs at.
-  const traySize = process.platform === "darwin" ? 16 : 32;
-  icon = icon.resize({ width: traySize, height: traySize });
+  if (process.platform === "darwin") {
+    // Already 16pt with an @2x sibling for retina; marking it a template lets
+    // macOS draw it dark on a light menu bar and light on a dark one.
+    icon.setTemplateImage(true);
+  } else {
+    // The colour asset ships at 64px; the notification area wants about 32px
+    // at the DPI scales it actually runs at.
+    icon = icon.resize({ width: 32, height: 32 });
+  }
 
   tray = new Tray(icon);
   tray.setToolTip(APP_NAME);
