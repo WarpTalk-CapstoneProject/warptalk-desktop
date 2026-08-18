@@ -6,7 +6,11 @@
 
 import { contextBridge, ipcRenderer } from "electron";
 
-import type { DesktopRuntimeCapability } from "../shared/types";
+import type {
+  DesktopRuntimeCapability,
+  VirtualAudioInstallResult,
+  VirtualAudioStatus,
+} from "../shared/types";
 
 contextBridge.exposeInMainWorld("warptalk", {
   getVersion: (): Promise<string> => ipcRenderer.invoke("app:version"),
@@ -36,6 +40,15 @@ contextBridge.exposeInMainWorld("warptalk", {
 
   openExternal: (url: string): Promise<void> =>
     ipcRenderer.invoke("app:open-external", url),
+
+  getVirtualAudioStatus: (): Promise<VirtualAudioStatus> =>
+    ipcRenderer.invoke("bridge:virtual-audio-status"),
+  installVirtualAudio: (): Promise<VirtualAudioInstallResult> =>
+    ipcRenderer.invoke("bridge:install-virtual-audio"),
+  openTranscriptWindow: (roomId: string): Promise<void> =>
+    ipcRenderer.invoke("bridge:open-transcript-window", roomId),
+  closeTranscriptWindow: (): Promise<void> =>
+    ipcRenderer.invoke("bridge:close-transcript-window"),
 
   minimize: (): void => ipcRenderer.send("window:minimize"),
   maximize: (): void => ipcRenderer.send("window:maximize"),
