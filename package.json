@@ -24,7 +24,8 @@
     "build:linux:remote": "electron-vite build && electron-builder --config electron-builder.remote.yml --linux",
     "preview": "electron-vite preview",
     "lint": "eslint src/ --ext .ts,.tsx",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:mac-signing": "node scripts/check-mac-signing-contract.mjs"
   },
   "dependencies": {
     "@microsoft/signalr": "^8.0.0",

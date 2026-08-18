@@ -79,9 +79,39 @@ The `.zip` pair is what `electron-updater` consumes; the `.dmg` pair is what the
 download page links.
 
 **Gatekeeper.** Until `MAC_CERTIFICATE_P12` is added as a repo secret the builds
-are unsigned and unnotarized, and macOS reports that fresh downloads are
-"damaged and can't be opened" rather than offering the older "open anyway"
-escape hatch. To run such a build locally, strip the quarantine attribute:
+are unsigned and unnotarized. There are two different failure modes here and
+they are worth keeping apart, because only one of them is survivable:
+
+| Bundle state | What the user sees | Way past it |
+|--------------|--------------------|-------------|
+| Half-signed (no `afterPack` hook) | *"WarpTalk is damaged and can't be opened."* | none — the dialog offers only Move to Trash |
+| Ad-hoc signed, unnotarized (today) | *"Apple could not verify WarpTalk is free of malware."* | Open Anyway, System Settings › Privacy & Security |
+| Developer ID + notarized | opens | — |
+
+v0.3.2 shipped in the first state. Electron's prebuilt binaries arrive
+linker-signed; electron-builder then rewrites `Info.plist` and copies
+`extraResources` in, invalidating that signature, and with no certificate
+configured it skips signing entirely instead of re-sealing the bundle. The
+result claims resources it does not seal, which Gatekeeper reads as tampering:
+
+```console
+$ codesign -dv WarpTalk.app
+Identifier=Electron      Info.plist=not bound      Sealed Resources=none
+$ spctl -a -t exec WarpTalk.app
+WarpTalk.app: code has no resources but signature indicates they must be present
+```
+
+`scripts/adhoc-sign-mac.js` (wired as `afterPack` in both builder configs) now
+re-seals the bundle with an ad-hoc signature, moving releases into the second
+row. Verify any mac artifact with:
+
+```bash
+codesign --verify --deep --strict --verbose=2 release/mac-arm64/WarpTalk.app
+```
+
+`valid on disk` plus `satisfies its Designated Requirement` is the pass.
+
+To skip the Open Anyway step on a team machine, strip the quarantine attribute:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/WarpTalk.app
@@ -90,6 +120,27 @@ xattr -dr com.apple.quarantine /Applications/WarpTalk.app
 Do not put that command next to a public download button — it teaches users to
 disarm Gatekeeper. It is a workaround for the team until the app is signed and
 notarized.
+
+**Getting to the third row.** Ad-hoc signing is the ceiling without money: the
+"Open Anyway" prompt exists because macOS has no way to learn who built the app.
+Apps that open silently — Chrome, Zoom, Docker — are all signed with a paid
+Developer ID *and* notarized. Reaching that state is a purchase plus three
+mechanical steps, none of which need code changes here:
+
+1. Join the Apple Developer Program (99 USD/year) and create a **Developer ID
+   Application** certificate. Export it as a `.p12`.
+2. Add repo secrets `MAC_CERTIFICATE_P12` (base64 of the `.p12`),
+   `MAC_CERTIFICATE_PASSWORD`, plus `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`
+   and `APPLE_TEAM_ID` for the notary service. The release workflow already
+   exports the first two on its own; the notary three need adding to it.
+3. Set `mac.notarize` in both builder configs. Leave it unset until the
+   credentials exist — electron-builder fails the build if it is on without
+   them, which is why it is not pre-wired.
+
+`scripts/adhoc-sign-mac.js` steps aside on its own once `CSC_LINK` is set, so
+nothing has to be removed. Until then the ad-hoc signature is what keeps the
+build openable at all, and `npm run check:mac-signing` fails the release if a
+builder config ever loses the hook.
 
 Note that a local build on a machine with a Developer ID in its keychain is
 signed with that identity, so it will behave differently from the unsigned

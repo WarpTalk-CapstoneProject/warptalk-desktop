@@ -2,6 +2,11 @@ appId: com.warptalk.desktop
 productName: WarpTalk
 copyright: Copyright (c) 2026 WarpTalk Team
 
+# Re-seals the macOS bundle with an ad-hoc signature. electron-builder leaves it half-signed when
+# no certificate is configured, and macOS reports a half-signed bundle as "damaged and can't be
+# opened" — a dialog with no way past it. See scripts/adhoc-sign-mac.js.
+afterPack: scripts/adhoc-sign-mac.js
+
 directories:
   output: release
   buildResources: resources

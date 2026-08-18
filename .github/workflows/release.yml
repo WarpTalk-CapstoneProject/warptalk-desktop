@@ -54,6 +54,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # A macOS build whose bundle is never re-sealed is not "unsigned", it is unopenable — the
+      # Gatekeeper dialog offers only Move to Trash. Nothing downstream catches that: the build
+      # goes green and the .dmg is the right size. Check the hook is wired before spending 20
+      # minutes producing artifacts nobody can install.
+      - name: Check macOS signing contract
+        run: npm run check:mac-signing
+
       # Code signing is opt-in, and the certificates are not bought yet.
       #
       # These used to be listed directly in the build step's `env:`, on the assumption that an
@@ -91,8 +98,11 @@ jobs:
             # warning that reads like a failure. Saying "do not look" makes the unsigned build a
             # stated choice rather than an accident.
             echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
-            echo "macOS: no certificate configured, building UNSIGNED. Gatekeeper will report"
-            echo "        downloads as damaged until MAC_CERTIFICATE_P12 is added."
+            echo "macOS: no certificate configured, building UNSIGNED. The afterPack hook"
+            echo "        (scripts/adhoc-sign-mac.js) still ad-hoc signs the bundle, without"
+            echo "        which macOS reports the download as damaged and offers no way past it."
+            echo "        The build stays unnotarized: first launch needs Open Anyway in System"
+            echo "        Settings > Privacy & Security until MAC_CERTIFICATE_P12 is added."
           fi
 
           if [ -n "$WIN_CERT" ]; then
