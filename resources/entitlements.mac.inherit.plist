@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!--
+      Entitlements for the helper executables inside the bundle (Renderer, GPU, Plugin, and the
+      crashpad handler). electron-builder signs every nested Mach-O separately and falls back to
+      its own three-key default for these unless this exact filename exists next to the main
+      entitlements in buildResources.
+
+      Media capture in Electron is initiated by the renderer, so the device entitlements have to be
+      present here too — granting them only on the main executable leaves getUserMedia failing in
+      the one process that calls it.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+  </dict>
+</plist>

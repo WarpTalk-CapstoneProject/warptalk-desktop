@@ -79,9 +79,39 @@ The `.zip` pair is what `electron-updater` consumes; the `.dmg` pair is what the
 download page links.
 
 **Gatekeeper.** Until `MAC_CERTIFICATE_P12` is added as a repo secret the builds
-are unsigned and unnotarized, and macOS reports that fresh downloads are
-"damaged and can't be opened" rather than offering the older "open anyway"
-escape hatch. To run such a build locally, strip the quarantine attribute:
+are unsigned and unnotarized. There are two different failure modes here and
+they are worth keeping apart, because only one of them is survivable:
+
+| Bundle state | What the user sees | Way past it |
+|--------------|--------------------|-------------|
+| Half-signed (no `afterPack` hook) | *"WarpTalk is damaged and can't be opened."* | none — the dialog offers only Move to Trash |
+| Ad-hoc signed, unnotarized (today) | *"Apple could not verify WarpTalk is free of malware."* | Open Anyway, System Settings › Privacy & Security |
+| Developer ID + notarized | opens | — |
+
+v0.3.2 shipped in the first state. Electron's prebuilt binaries arrive
+linker-signed; electron-builder then rewrites `Info.plist` and copies
+`extraResources` in, invalidating that signature, and with no certificate
+configured it skips signing entirely instead of re-sealing the bundle. The
+result claims resources it does not seal, which Gatekeeper reads as tampering:
+
+```console
+$ codesign -dv WarpTalk.app
+Identifier=Electron      Info.plist=not bound      Sealed Resources=none
+$ spctl -a -t exec WarpTalk.app
+WarpTalk.app: code has no resources but signature indicates they must be present
+```
+
+`scripts/adhoc-sign-mac.js` (wired as `afterPack` in both builder configs) now
+re-seals the bundle with an ad-hoc signature, moving releases into the second
+row. Verify any mac artifact with:
+
+```bash
+codesign --verify --deep --strict --verbose=2 release/mac-arm64/WarpTalk.app
+```
+
+`valid on disk` plus `satisfies its Designated Requirement` is the pass.
+
+To skip the Open Anyway step on a team machine, strip the quarantine attribute:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/WarpTalk.app
@@ -90,6 +120,76 @@ xattr -dr com.apple.quarantine /Applications/WarpTalk.app
 Do not put that command next to a public download button — it teaches users to
 disarm Gatekeeper. It is a workaround for the team until the app is signed and
 notarized.
+
+**Getting to the third row.** Ad-hoc signing is the ceiling without money: the
+"Open Anyway" prompt exists because macOS has no way to learn who built the app.
+Apps that open silently — Chrome, Zoom, Docker — are all signed with a paid
+Developer ID *and* notarized. The build side of that is already wired here; what
+is missing is five repo secrets, and nothing but the account holder can produce
+them.
+
+**Step 1 — a Developer ID Application certificate.** Not an Apple Development
+certificate. The two look alike in Keychain Access and are not interchangeable:
+Apple Development is what a *free* account issues, it signs builds for machines
+registered to the team, and the notary service refuses it. Only the paid Apple
+Developer Program issues Developer ID, and only the Account Holder (or an Admin
+on an organization team) can create one. Create it at
+[developer.apple.com/account/resources/certificates](https://developer.apple.com/account/resources/certificates),
+download it, double-click to install, then export it from Keychain Access →
+**My Certificates** as a `.p12` with a password. Confirm you have the right kind
+before going further:
+
+```bash
+security find-identity -v -p codesigning | grep "Developer ID Application"
+```
+
+An empty result means the certificate is not installed, whatever else the
+keychain shows.
+
+**Step 2 — an app-specific password.** The notary service will not accept an
+Apple ID password, and it will not survive two-factor. Generate one at
+[account.apple.com](https://account.apple.com) → Sign-In and Security →
+App-Specific Passwords. Your Team ID is the ten-character code shown under
+Membership details in the developer account.
+
+**Step 3 — five repo secrets.** `Settings → Secrets and variables → Actions`:
+
+| Secret | Value |
+|--------|-------|
+| `MAC_CERTIFICATE_P12` | `base64 -i Developer_ID.p12 \| pbcopy` |
+| `MAC_CERTIFICATE_PASSWORD` | the password used on export |
+| `APPLE_ID` | the Apple ID that owns the membership |
+| `APPLE_APP_SPECIFIC_PASSWORD` | from step 2, `xxxx-xxxx-xxxx-xxxx` |
+| `APPLE_TEAM_ID` | the ten-character Team ID |
+
+The release workflow exports all five on its own, and refuses to start a build
+that has some of the notary three but not all — a half-configured release is a
+typo in a secret name, and it produces a build that looks finished and stops one
+row short of opening.
+
+**What runs on its own after that.** `scripts/adhoc-sign-mac.js` (`afterPack`)
+steps aside as soon as `CSC_LINK` is set, so nothing has to be removed;
+electron-builder signs with the certificate; then `scripts/notarize-mac.js`
+(`afterSign`) uploads the bundle to Apple, waits for the verdict, staples the
+ticket, and asks Gatekeeper for its opinion of the result — the build fails
+unless `spctl` answers `source=Notarized Developer ID`. That hook refuses to
+upload anything that is not Developer ID signed, which is not paranoia: contrary
+to its documentation, electron-builder does *not* skip `afterSign` on macOS when
+signing was skipped, so the hook can and does get handed ad-hoc bundles. That happens *before*
+the `.dmg` is built, which is deliberate: stapling afterwards would rewrite bytes
+the blockmap and the sha512 in `latest-mac.yml` were already computed over, and
+silently break `electron-updater` for every existing install. The `.dmg` is
+therefore not itself notarized and does not need to be — Gatekeeper judges the
+app, and the app carries its own ticket even offline.
+
+Two things the hardened runtime changes once signing is real. It is inert on an
+ad-hoc signature, so `resources/entitlements.mac.plist` has had no effect so far;
+from the first Developer ID build it is enforced, and a missing
+`com.apple.security.device.audio-input` means macOS denies the microphone with no
+prompt and no error the app can see — a build that installs, launches, looks
+perfect and cannot translate. `npm run check:mac-signing` fails the release if
+either hook is unwired, if either entitlements file is missing, or if it has lost
+one of those keys.
 
 Note that a local build on a machine with a Developer ID in its keychain is
 signed with that identity, so it will behave differently from the unsigned

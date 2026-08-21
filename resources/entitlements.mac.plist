@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!--
+      Entitlements for the main WarpTalk executable, signed with the hardened runtime.
+
+      electron-builder ships a default entitlements file with three keys, and it is what got used
+      until now. That default was survivable only because CI never actually signed anything: the
+      hardened runtime is not enforced on a bundle that was never sealed with a real identity. The
+      moment a Developer ID certificate is configured, `hardenedRuntime: true` starts being
+      enforced for real, and the two device entitlements below stop being optional — without them
+      macOS denies the microphone and the camera outright, with no prompt and no error the app can
+      see. A translation client that cannot open a microphone is a worse failure than one that
+      cannot be opened at all, because it looks like it launched fine.
+    -->
+
+    <!-- V8 compiles JavaScript at runtime; without these Electron aborts on launch. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- Electron passes configuration to its helpers through DYLD_* variables. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <!-- https://github.com/electron-userland/electron-builder/issues/3940 -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!--
+      Capture. The Info.plist usage strings (NSMicrophoneUsageDescription and friends) decide what
+      the consent dialog says; these decide whether the hardened runtime lets the process ask at
+      all. Both are needed. Screen capture has no entitlement — it is governed by TCC and the
+      NSScreenCaptureUsageDescription string set in the builder config.
+    -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+  </dict>
+</plist>
