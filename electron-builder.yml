@@ -7,6 +7,12 @@ copyright: Copyright (c) 2026 WarpTalk Team
 # opened" — a dialog with no way past it. See scripts/adhoc-sign-mac.js.
 afterPack: scripts/adhoc-sign-mac.js
 
+# Submits the signed bundle to Apple's notary service and staples the ticket, so a fresh download
+# opens on a double click instead of stopping at "Apple could not verify". Runs only when a
+# certificate was configured — electron-builder skips afterSign when no signing occurred — and
+# no-ops without notary credentials. See scripts/notarize-mac.js.
+afterSign: scripts/notarize-mac.js
+
 directories:
   output: release
   buildResources: resources
@@ -50,6 +56,18 @@ mac:
         - arm64
         - x64
   hardenedRuntime: true
+  # The hardened runtime is inert on an ad-hoc signature, so these entitlements have done nothing
+  # so far. They start being enforced the moment a Developer ID certificate signs the bundle, and
+  # without the two device keys macOS denies the microphone and camera with no prompt and no error
+  # the app can observe. Named explicitly rather than left to the buildResources lookup, so a
+  # rename cannot quietly fall back to electron-builder's three-key default.
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.inherit.plist
+  # Notarization is done by the afterSign hook above, never by electron-builder itself. Left unset
+  # with an APPLE_ID in the environment, electron-builder takes its legacy altool branch, which
+  # sends no team id — and Apple decommissioned altool in 2023, so that fails after the upload
+  # rather than before it.
+  notarize: false
 
 win:
   icon: resources/warptalk-logo-primary.ico

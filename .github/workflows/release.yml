@@ -79,6 +79,9 @@ jobs:
         env:
           MAC_CERT: ${{ secrets.MAC_CERTIFICATE_P12 }}
           MAC_CERT_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           WIN_CERT: ${{ secrets.WIN_CERTIFICATE_PFX }}
           WIN_CERT_PASSWORD: ${{ secrets.WIN_CERTIFICATE_PASSWORD }}
         run: |
@@ -93,6 +96,33 @@ jobs:
             export_secret CSC_LINK "$MAC_CERT"
             export_secret CSC_KEY_PASSWORD "$MAC_CERT_PASSWORD"
             echo "macOS: signing with the configured certificate."
+
+            # Signing and notarizing are two different purchases of trust and they fail
+            # differently. A signed-but-unnotarized download still stops at "Apple could not
+            # verify WarpTalk is free of malware" — survivable, but only via Open Anyway, which
+            # is not a thing to put in front of a demo audience. The notary service is what
+            # removes the prompt, and it needs all three of these.
+            if [ -n "$NOTARY_APPLE_ID" ] && [ -n "$NOTARY_PASSWORD" ] && [ -n "$NOTARY_TEAM_ID" ]; then
+              export_secret APPLE_ID "$NOTARY_APPLE_ID"
+              export_secret APPLE_APP_SPECIFIC_PASSWORD "$NOTARY_PASSWORD"
+              export_secret APPLE_TEAM_ID "$NOTARY_TEAM_ID"
+              echo "macOS: notarizing with the configured notary credentials."
+            elif [ -n "$NOTARY_APPLE_ID$NOTARY_PASSWORD$NOTARY_TEAM_ID" ]; then
+              # Two of three set is a typo in a secret name, and the build it would otherwise
+              # produce looks finished and stops one row short of opening. Refuse here rather
+              # than twenty minutes downstream.
+              echo "macOS: notarization is half-configured. Set all three of APPLE_ID," >&2
+              echo "       APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID, or none of them." >&2
+              if [ -z "$NOTARY_APPLE_ID" ]; then echo "       missing: APPLE_ID" >&2; fi
+              if [ -z "$NOTARY_PASSWORD" ]; then echo "       missing: APPLE_APP_SPECIFIC_PASSWORD" >&2; fi
+              if [ -z "$NOTARY_TEAM_ID" ]; then echo "       missing: APPLE_TEAM_ID" >&2; fi
+              exit 1
+            else
+              echo "macOS: signed but NOT notarized — no notary credentials configured. First"
+              echo "        launch of a fresh download needs Open Anyway in System Settings >"
+              echo "        Privacy & Security until APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and"
+              echo "        APPLE_TEAM_ID are added."
+            fi
           else
             # Without this electron-builder searches the runner keychain, finds nothing, and logs a
             # warning that reads like a failure. Saying "do not look" makes the unsigned build a
