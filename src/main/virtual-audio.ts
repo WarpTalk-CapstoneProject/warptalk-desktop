@@ -118,7 +118,13 @@ const WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS: ReadonlyArray<VirtualAudioRiskC
   {
     id: "R5",
     status: "guarded",
-    control: "Start is blocked until the user grants scoped capture consent from the meeting-window picker.",
+    /**
+     * "Scoped" used to appear here, and it was the wrong word: picking a window does not narrow the
+     * capture to that window. Process loopback takes the whole browser (R9), so consent has to be
+     * asked for what is actually taken. A picker that implies otherwise is a promise the capture
+     * breaks.
+     */
+    control: "Start is blocked until the user consents to capturing every sound from the chosen browser, not only the meeting window.",
   },
   {
     id: "R6",
