@@ -7,7 +7,7 @@ export interface WarpTalkAPI {
   getVersion: () => Promise<string>;
   getPlatform: () => string;
   getRuntimeCapability: () => Promise<DesktopRuntimeCapability>;
-  startAudioCapture: () => Promise<void>;
+  startAudioCapture: (request?: WindowsLoopbackCaptureRequest) => Promise<WindowsLoopbackStartResult>;
   stopAudioCapture: () => Promise<void>;
   joinTranslationRoom: (translationRoomId: string) => Promise<void>;
   leaveTranslationRoom: () => Promise<void>;
@@ -63,7 +63,7 @@ export interface VirtualAudioStatus {
 
 export interface VirtualAudioRiskControl {
   id: "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "B1" | "B2" | "X1";
-  status: "mitigated" | "implemented" | "known-limitation" | "requires-runtime";
+  status: "mitigated" | "guarded" | "implemented" | "known-limitation" | "requires-runtime";
   control: string;
 }
 
@@ -71,6 +71,33 @@ export interface VirtualAudioInstallResult {
   started: boolean;
   reason?: string;
 }
+
+export interface WindowsLoopbackCaptureRequest {
+  /** The root browser process that owns the selected Google Meet window. */
+  targetProcessId?: number;
+  /** Must be true: false means EXCLUDE_TARGET_PROCESS_TREE and captures the wrong side. */
+  includeTargetProcessTree?: boolean;
+  /** Set only after the user picked the meeting window and accepted scoped audio capture. */
+  consentGranted?: boolean;
+}
+
+export type WindowsLoopbackStartResult =
+  | { started: true }
+  | {
+      started: false;
+      riskId: "R2" | "R3" | "R5" | "R6" | "R7" | "R8" | "B2" | "X1";
+      reason:
+        | "unsupported-platform"
+        | "driver-missing"
+        | "process-loopback-unsupported"
+        | "consent-required"
+        | "target-process-required"
+        | "include-target-tree-required"
+        | "electron-loopback-api-not-ready"
+        | "pcm-to-track-bridge-not-ready"
+        | "silence-padding-not-ready"
+        | "target-process-resolver-not-ready";
+    };
 
 export interface DesktopRuntimeCapability {
   deviceIdHash: string;

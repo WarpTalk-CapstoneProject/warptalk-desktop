@@ -21,6 +21,7 @@ import { spawn } from "child_process";
 import path from "path";
 
 import { AudioRuntimeService } from "./audio-runtime";
+import { WindowsLoopbackRuntime } from "./windows-loopback-runtime";
 import {
   BLACKHOLE_BREW_COMMAND,
   BLACKHOLE_DOWNLOAD_PAGE,
@@ -40,6 +41,7 @@ let tray: Tray | null = null;
  */
 let resolvedWebOrigin: string | null = null;
 const audioRuntime = new AudioRuntimeService();
+const windowsLoopbackRuntime = new WindowsLoopbackRuntime();
 const webRuntime = new WebRuntimeService();
 const APP_NAME = "WarpTalk";
 const APP_MODEL_ID = "com.warptalk.desktop";
@@ -78,8 +80,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle("app:open-external", async (_event, url: string) => {
     openExternalUrl(url);
   });
-  ipcMain.handle("audio:start-capture", async () => undefined);
-  ipcMain.handle("audio:stop-capture", async () => undefined);
+  ipcMain.handle("audio:start-capture", async (_event, request) =>
+    windowsLoopbackRuntime.start(request),
+  );
+  ipcMain.handle("audio:stop-capture", async () => windowsLoopbackRuntime.stop());
   ipcMain.handle("translationRoom:join", async () => undefined);
   ipcMain.handle("translationRoom:leave", async () => undefined);
 

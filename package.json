@@ -25,7 +25,7 @@
     "preview": "electron-vite preview",
     "lint": "eslint src/ --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
-    "test:virtual-audio": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test src/main/__tests__/virtual-audio.test.js",
+    "test:virtual-audio": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test src/main/__tests__/virtual-audio.test.js src/main/__tests__/windows-loopback-runtime.test.js",
     "check:mac-signing": "node scripts/check-mac-signing-contract.mjs"
   },
   "dependencies": {

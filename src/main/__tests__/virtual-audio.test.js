@@ -36,7 +36,9 @@ test("Windows exposes every free-cable loopback risk control in code", () => {
     ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "B1", "B2", "X1"],
   );
   assert.equal(status.riskControls?.find((risk) => risk.id === "R1")?.status, "mitigated");
-  assert.equal(status.riskControls?.find((risk) => risk.id === "R8")?.status, "requires-runtime");
+  for (const id of ["R2", "R3", "R4", "R5", "R6", "R7", "R8"]) {
+    assert.equal(status.riskControls?.find((risk) => risk.id === id)?.status, "guarded");
+  }
   assert.equal(status.riskControls?.find((risk) => risk.id === "B1")?.status, "implemented");
   assert.equal(status.riskControls?.find((risk) => risk.id === "X1")?.status, "implemented");
 });

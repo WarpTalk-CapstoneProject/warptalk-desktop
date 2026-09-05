@@ -18,8 +18,8 @@ contextBridge.exposeInMainWorld("warptalk", {
   getRuntimeCapability: (): Promise<DesktopRuntimeCapability> =>
     ipcRenderer.invoke("runtime:capability"),
 
-  startAudioCapture: (): Promise<void> =>
-    ipcRenderer.invoke("audio:start-capture"),
+  startAudioCapture: (request?: unknown) =>
+    ipcRenderer.invoke("audio:start-capture", request),
   stopAudioCapture: (): Promise<void> =>
     ipcRenderer.invoke("audio:stop-capture"),
 

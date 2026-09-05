@@ -66,7 +66,7 @@ export interface VirtualAudioStatus {
 
 export interface VirtualAudioRiskControl {
   id: "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "B1" | "B2" | "X1";
-  status: "mitigated" | "implemented" | "known-limitation" | "requires-runtime";
+  status: "mitigated" | "guarded" | "implemented" | "known-limitation" | "requires-runtime";
   control: string;
 }
 
@@ -102,38 +102,38 @@ const WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS: ReadonlyArray<VirtualAudioRiskC
   },
   {
     id: "R2",
-    status: "requires-runtime",
-    control: "Runtime must avoid chromeMediaSource:'desktop' and use Electron loopback capture capability probes.",
+    status: "guarded",
+    control: "Start is blocked until the Electron loopback path is wired and chromeMediaSource:'desktop' is avoided.",
   },
   {
     id: "R3",
-    status: "requires-runtime",
-    control: "Native PCM must be bridged to a MediaStreamTrack before inbound audio can be published.",
+    status: "guarded",
+    control: "Start is blocked until native PCM can be bridged to a publishable MediaStreamTrack.",
   },
   {
     id: "R4",
-    status: "requires-runtime",
-    control: "If Electron getDisplayMedia is used, request minimal video then stop it after validating audio survives.",
+    status: "guarded",
+    control: "The runtime path is gated behind the Electron loopback adapter so getDisplayMedia fallback cannot start implicitly.",
   },
   {
     id: "R5",
-    status: "requires-runtime",
-    control: "Runtime must show consent and a meeting-window picker before capturing process audio.",
+    status: "guarded",
+    control: "Start is blocked until the user grants scoped capture consent from the meeting-window picker.",
   },
   {
     id: "R6",
-    status: "requires-runtime",
-    control: "Runtime must insert silence when loopback produces no packets so the STT timeline stays continuous.",
+    status: "guarded",
+    control: "Start is blocked until silence padding is available for no-packet gaps in the loopback stream.",
   },
   {
     id: "R7",
-    status: "requires-runtime",
-    control: "The include-process-tree flag must be wrapped in a named API and tested so it cannot be inverted silently.",
+    status: "guarded",
+    control: "Start requires includeTargetProcessTree=true so the loopback flag cannot be inverted silently.",
   },
   {
     id: "R8",
-    status: "requires-runtime",
-    control: "Runtime must resolve the selected Meet window to the root browser process before starting loopback.",
+    status: "guarded",
+    control: "Start is blocked until a selected Meet window resolves to the root browser process.",
   },
   {
     id: "B1",
