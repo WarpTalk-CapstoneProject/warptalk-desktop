@@ -320,7 +320,7 @@ export function describeWindowsVirtualAudioForEndpoints(
       outboundOnly: mode === "outbound-only",
       captionOnly: true,
       processLoopback,
-      processLoopbackRuntime: "not-wired",
+      processLoopbackRuntime: processLoopback ? "available" : "not-wired",
       minWindowsProcessLoopbackBuild: WINDOWS_PROCESS_LOOPBACK_MIN_BUILD,
     },
     riskControls: [...WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS],

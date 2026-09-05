@@ -1,6 +1,7 @@
 import { detectVirtualAudio, type VirtualAudioStatus } from "./virtual-audio.ts";
 import type {
   WindowsLoopbackCaptureRequest,
+  WindowsLoopbackPcmChunk,
   WindowsLoopbackStartResult,
 } from "../shared/types.ts";
 
@@ -22,6 +23,29 @@ export interface WindowsLoopbackRuntimeAdapter {
   stop: () => Promise<void>;
 }
 
+export interface LoopbackCaptureNativeModule {
+  default?: {
+    LoopbackCapture: new () => LoopbackCaptureNativeSession;
+  };
+  LoopbackCapture?: new () => LoopbackCaptureNativeSession;
+}
+
+export interface LoopbackCaptureNativeSession {
+  start: (
+    targetProcessId: number,
+    includeProcessTree: boolean,
+    callback: (chunk: Buffer) => void,
+  ) => void;
+  stop: () => void;
+}
+
+export interface NativeWindowsLoopbackAdapterOptions {
+  publishPcmChunk: (chunk: WindowsLoopbackPcmChunk) => void;
+  resolveTargetProcessId: (sourceId: string) => Promise<number | null>;
+  importLoopbackCapture?: () => Promise<LoopbackCaptureNativeModule>;
+  platform?: NodeJS.Platform;
+}
+
 type WindowsLoopbackStop = Exclude<WindowsLoopbackStartResult, { started: true }>;
 
 const MISSING_RUNTIME_ADAPTER: WindowsLoopbackRuntimeAdapter = {
@@ -34,6 +58,48 @@ const MISSING_RUNTIME_ADAPTER: WindowsLoopbackRuntimeAdapter = {
   },
   stop: async () => undefined,
 };
+
+export function createNativeWindowsLoopbackAdapter(
+  options: NativeWindowsLoopbackAdapterOptions,
+): WindowsLoopbackRuntimeAdapter {
+  let activeCapture: LoopbackCaptureNativeSession | null = null;
+  const importLoopbackCapture =
+    options.importLoopbackCapture ??
+    (() => import("loopback-capture") as Promise<LoopbackCaptureNativeModule>);
+  const platform = options.platform ?? process.platform;
+
+  return {
+    electronLoopbackApiReady: platform === "win32",
+    pcmToTrackBridgeReady: true,
+    silencePaddingReady: true,
+    targetProcessResolverReady: true,
+    resolveTargetProcessId: options.resolveTargetProcessId,
+    start: async (request) => {
+      activeCapture?.stop();
+
+      const loopback = await importLoopbackCapture();
+      const Capture = loopback.default?.LoopbackCapture ?? loopback.LoopbackCapture;
+      if (!Capture) throw new Error("loopback-capture did not expose LoopbackCapture.");
+
+      const capture = new Capture();
+      capture.start(request.targetProcessId, request.includeTargetProcessTree, (buffer) => {
+        const data = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+        options.publishPcmChunk({
+          data: new Uint8Array(data),
+          format: "s16le",
+          sampleRate: 48000,
+          channelCount: 2,
+          capturedAtMs: Date.now(),
+        });
+      });
+      activeCapture = capture;
+    },
+    stop: async () => {
+      activeCapture?.stop();
+      activeCapture = null;
+    },
+  };
+}
 
 function missing(
   riskId: WindowsLoopbackStop["riskId"],
@@ -110,12 +176,16 @@ export class WindowsLoopbackRuntime {
     const decision = evaluateWindowsLoopbackStart(status, this.adapter, resolvedRequest);
     if (!decision.started) return decision;
 
-    await this.adapter.start({
-      consentGranted: true,
-      includeTargetProcessTree: true,
-      sourceId: resolvedRequest.sourceId,
-      targetProcessId: resolvedRequest.targetProcessId!,
-    });
+    try {
+      await this.adapter.start({
+        consentGranted: true,
+        includeTargetProcessTree: true,
+        sourceId: resolvedRequest.sourceId,
+        targetProcessId: resolvedRequest.targetProcessId!,
+      });
+    } catch {
+      return missing("R2", "native-loopback-adapter-unavailable");
+    }
     return { started: true };
   }
 

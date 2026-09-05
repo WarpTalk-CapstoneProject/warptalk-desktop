@@ -21,7 +21,10 @@ import { spawn } from "child_process";
 import path from "path";
 
 import { AudioRuntimeService } from "./audio-runtime";
-import { WindowsLoopbackRuntime } from "./windows-loopback-runtime";
+import {
+  createNativeWindowsLoopbackAdapter,
+  WindowsLoopbackRuntime,
+} from "./windows-loopback-runtime";
 import {
   describeWindowsLoopbackSource,
   resolveWindowOwnerProcessId,
@@ -45,17 +48,14 @@ let tray: Tray | null = null;
  */
 let resolvedWebOrigin: string | null = null;
 const audioRuntime = new AudioRuntimeService();
-const windowsLoopbackRuntime = new WindowsLoopbackRuntime({
-  electronLoopbackApiReady: false,
-  pcmToTrackBridgeReady: false,
-  silencePaddingReady: false,
-  targetProcessResolverReady: true,
-  resolveTargetProcessId: async (sourceId) => resolveWindowOwnerProcessId(sourceId),
-  start: async () => {
-    throw new Error("Windows loopback capture adapter is not wired.");
-  },
-  stop: async () => undefined,
-});
+const windowsLoopbackRuntime = new WindowsLoopbackRuntime(
+  createNativeWindowsLoopbackAdapter({
+    publishPcmChunk: (chunk) => {
+      mainWindow?.webContents.send("audio:loopback-pcm-chunk", chunk);
+    },
+    resolveTargetProcessId: async (sourceId) => resolveWindowOwnerProcessId(sourceId),
+  }),
+);
 const webRuntime = new WebRuntimeService();
 const APP_NAME = "WarpTalk";
 const APP_MODEL_ID = "com.warptalk.desktop";

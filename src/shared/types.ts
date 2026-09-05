@@ -10,6 +10,7 @@ export interface WarpTalkAPI {
   listWindowsLoopbackSources: () => Promise<WindowsLoopbackSource[]>;
   startAudioCapture: (request?: WindowsLoopbackCaptureRequest) => Promise<WindowsLoopbackStartResult>;
   stopAudioCapture: () => Promise<void>;
+  onWindowsLoopbackPcmChunk: (callback: (chunk: WindowsLoopbackPcmChunk) => void) => () => void;
   joinTranslationRoom: (translationRoomId: string) => Promise<void>;
   leaveTranslationRoom: () => Promise<void>;
   onTranscript: (callback: (data: TranscriptUpdate) => void) => void;
@@ -97,6 +98,7 @@ export type WindowsLoopbackStartResult =
         | "target-process-required"
         | "target-source-unresolved"
         | "include-target-tree-required"
+        | "native-loopback-adapter-unavailable"
         | "electron-loopback-api-not-ready"
         | "pcm-to-track-bridge-not-ready"
         | "silence-padding-not-ready"
@@ -109,6 +111,14 @@ export interface WindowsLoopbackSource {
   windowHandle?: number;
   ownerProcessId?: number;
   likelyMeetingWindow: boolean;
+}
+
+export interface WindowsLoopbackPcmChunk {
+  data: Uint8Array;
+  format: "s16le";
+  sampleRate: 48000;
+  channelCount: 2;
+  capturedAtMs: number;
 }
 
 export interface DesktopRuntimeCapability {

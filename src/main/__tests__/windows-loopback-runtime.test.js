@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { evaluateWindowsLoopbackStart, WindowsLoopbackRuntime } from "../windows-loopback-runtime.ts";
+import {
+  createNativeWindowsLoopbackAdapter,
+  evaluateWindowsLoopbackStart,
+  WindowsLoopbackRuntime,
+} from "../windows-loopback-runtime.ts";
 
 function readyStatus(overrides = {}) {
   return {
@@ -239,4 +243,67 @@ test("Windows loopback runtime fails closed when a selected source cannot resolv
   });
 
   assert.deepEqual(result, { started: false, riskId: "R8", reason: "target-source-unresolved" });
+});
+
+test("native Windows loopback adapter starts process capture and publishes PCM chunks", async () => {
+  let startCall = null;
+  let stopCalls = 0;
+  const published = [];
+  let onData = null;
+  const adapter = createNativeWindowsLoopbackAdapter({
+    platform: "win32",
+    publishPcmChunk: (chunk) => published.push(chunk),
+    resolveTargetProcessId: async () => 4242,
+    importLoopbackCapture: async () => ({
+      default: {
+        LoopbackCapture: class {
+          start(targetProcessId, includeProcessTree, callback) {
+            startCall = { targetProcessId, includeProcessTree };
+            onData = callback;
+          }
+
+          stop() {
+            stopCalls += 1;
+          }
+        },
+      },
+    }),
+  });
+
+  await adapter.start({
+    sourceId: "window:123456:0",
+    targetProcessId: 4242,
+    includeTargetProcessTree: true,
+    consentGranted: true,
+  });
+  onData(Buffer.from([1, 0, 255, 255]));
+  await adapter.stop();
+
+  assert.deepEqual(startCall, { targetProcessId: 4242, includeProcessTree: true });
+  assert.equal(stopCalls, 1);
+  assert.equal(published.length, 1);
+  assert.deepEqual([...published[0].data], [1, 0, 255, 255]);
+  assert.equal(published[0].format, "s16le");
+  assert.equal(published[0].sampleRate, 48000);
+  assert.equal(published[0].channelCount, 2);
+});
+
+test("Windows loopback runtime returns R2 when the native adapter cannot load", async () => {
+  const adapter = createNativeWindowsLoopbackAdapter({
+    platform: "win32",
+    publishPcmChunk: () => undefined,
+    resolveTargetProcessId: async () => 4242,
+    importLoopbackCapture: async () => {
+      throw new Error("missing native module");
+    },
+  });
+  const runtime = new WindowsLoopbackRuntime(adapter, () => readyStatus());
+
+  const result = await runtime.start(READY_REQUEST);
+
+  assert.deepEqual(result, {
+    started: false,
+    riskId: "R2",
+    reason: "native-loopback-adapter-unavailable",
+  });
 });

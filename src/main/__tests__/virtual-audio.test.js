@@ -16,7 +16,7 @@ test("Windows recommends the free cable when it is installed on a process-loopba
   assert.equal(status.ready, false);
   assert.equal(status.recommendedProviderId, "vbcable-free");
   assert.equal(status.capabilities?.processLoopback, true);
-  assert.equal(status.capabilities?.processLoopbackRuntime, "not-wired");
+  assert.equal(status.capabilities?.processLoopbackRuntime, "available");
   assert.equal(status.capabilities?.minWindowsProcessLoopbackBuild, 20348);
   assert.equal(status.capabilities?.outboundOnly, true);
   assert.deepEqual(
@@ -52,6 +52,7 @@ test("Windows does not mark the free cable primary path usable below process-loo
   assert.equal(status.bridgeMode, "caption-only");
   assert.equal(status.recommendedProviderId, "vbcable-free");
   assert.equal(status.capabilities?.processLoopback, false);
+  assert.equal(status.capabilities?.processLoopbackRuntime, "not-wired");
   assert.equal(status.capabilities?.outboundOnly, false);
   assert.deepEqual(
     status.devices.map((device) => [device.providerId, device.providerRole, device.installed]),

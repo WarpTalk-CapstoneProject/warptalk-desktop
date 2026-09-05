@@ -8,6 +8,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 import type {
   DesktopRuntimeCapability,
+  WindowsLoopbackPcmChunk,
   VirtualAudioInstallResult,
   VirtualAudioStatus,
 } from "../shared/types";
@@ -24,6 +25,11 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.invoke("audio:start-capture", request),
   stopAudioCapture: (): Promise<void> =>
     ipcRenderer.invoke("audio:stop-capture"),
+  onWindowsLoopbackPcmChunk: (callback: (chunk: WindowsLoopbackPcmChunk) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, chunk: WindowsLoopbackPcmChunk) => callback(chunk);
+    ipcRenderer.on("audio:loopback-pcm-chunk", listener);
+    return () => ipcRenderer.off("audio:loopback-pcm-chunk", listener);
+  },
 
   joinTranslationRoom: (translationRoomId: string): Promise<void> =>
     ipcRenderer.invoke("translationRoom:join", translationRoomId),
