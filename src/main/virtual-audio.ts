@@ -6,18 +6,20 @@
  * is a thing this app can install on the user's behalf. So the bridge borrows an existing virtual
  * device and this module's job is to find it, describe it, and say plainly when it is missing.
  *
- * Two independent devices are needed, because the bridge runs in both directions at once:
+ * The bridge runs in both directions at once:
  *
  *   outbound  WarpTalk writes the dubbed voice here, and the user picks it as the MICROPHONE
  *             inside Google Meet.
- *   inbound   the user picks it as the SPEAKER inside Google Meet, and WarpTalk reads the far
- *             side's audio back out of it.
+ *   inbound   WarpTalk captures the far side's audio from the meeting app.
  *
- * One device cannot do both: whatever is written to it is what is read from it, so a single
- * device would feed the user's own dubbed voice straight back into the pipeline.
+ * macOS uses two BlackHole devices. Windows primary uses one free VB-CABLE device for outbound
+ * and per-process loopback for inbound, so the user's own dub is outside the captured process
+ * tree instead of being separated by a second cable.
  */
 
 import fs from "fs";
+import { spawnSync } from "child_process";
+import os from "os";
 
 /** Where macOS looks for audio HAL plug-ins. */
 const MAC_HAL_DIRECTORY = "/Library/Audio/Plug-Ins/HAL";
@@ -31,6 +33,9 @@ export interface VirtualAudioDevice {
   /** What the device is called in Google Meet's device picker — the string the user hunts for. */
   deviceName: string;
   installed: boolean;
+  providerId?: string;
+  providerName?: string;
+  providerRole?: "primary" | "backup";
 }
 
 export interface VirtualAudioStatus {
@@ -40,12 +45,29 @@ export interface VirtualAudioStatus {
   devices: VirtualAudioDevice[];
   /** Both legs present. */
   ready: boolean;
+  bridgeMode?: "full" | "outbound-only" | "installed-not-running" | "caption-only";
+  recommendedProviderId?: string;
+  capabilities?: {
+    fullBridge: boolean;
+    outboundOnly: boolean;
+    captionOnly: boolean;
+    processLoopback: boolean;
+    processLoopbackRuntime?: "available" | "not-wired";
+    minWindowsProcessLoopbackBuild?: number;
+  };
+  riskControls?: VirtualAudioRiskControl[];
   /**
    * Other virtual drivers already on the machine. Not used for routing — they belong to other
    * applications — but worth surfacing, because "I already have a virtual mic" is the first thing
    * a user says when asked to install one, and naming theirs is how support conversations end.
    */
   foreignDrivers: string[];
+}
+
+export interface VirtualAudioRiskControl {
+  id: "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "B1" | "B2" | "X1";
+  status: "mitigated" | "implemented" | "known-limitation" | "requires-runtime";
+  control: string;
 }
 
 /**
@@ -59,6 +81,128 @@ const MAC_DEVICES: ReadonlyArray<Omit<VirtualAudioDevice, "installed">> = [
   { leg: "outbound", driverBundle: "BlackHole2ch.driver", deviceName: "BlackHole 2ch" },
   { leg: "inbound", driverBundle: "BlackHole16ch.driver", deviceName: "BlackHole 16ch" },
 ];
+
+interface VirtualAudioProvider {
+  id: string;
+  name: string;
+  platform: NodeJS.Platform;
+  role: "primary" | "backup";
+  mode: "full" | "outbound-only";
+  runtime: "passive" | "requires-engine";
+  devices: ReadonlyArray<Omit<VirtualAudioDevice, "installed" | "providerId" | "providerName">>;
+}
+
+const WINDOWS_PROCESS_LOOPBACK_MIN_BUILD = 20348;
+
+const WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS: ReadonlyArray<VirtualAudioRiskControl> = [
+  {
+    id: "R1",
+    status: "mitigated",
+    control: "C1a PASS proved INCLUDE_TARGET_PROCESS_TREE isolates Chrome audio from non-Chrome audio.",
+  },
+  {
+    id: "R2",
+    status: "requires-runtime",
+    control: "Runtime must avoid chromeMediaSource:'desktop' and use Electron loopback capture capability probes.",
+  },
+  {
+    id: "R3",
+    status: "requires-runtime",
+    control: "Native PCM must be bridged to a MediaStreamTrack before inbound audio can be published.",
+  },
+  {
+    id: "R4",
+    status: "requires-runtime",
+    control: "If Electron getDisplayMedia is used, request minimal video then stop it after validating audio survives.",
+  },
+  {
+    id: "R5",
+    status: "requires-runtime",
+    control: "Runtime must show consent and a meeting-window picker before capturing process audio.",
+  },
+  {
+    id: "R6",
+    status: "requires-runtime",
+    control: "Runtime must insert silence when loopback produces no packets so the STT timeline stays continuous.",
+  },
+  {
+    id: "R7",
+    status: "requires-runtime",
+    control: "The include-process-tree flag must be wrapped in a named API and tested so it cannot be inverted silently.",
+  },
+  {
+    id: "R8",
+    status: "requires-runtime",
+    control: "Runtime must resolve the selected Meet window to the root browser process before starting loopback.",
+  },
+  {
+    id: "B1",
+    status: "implemented",
+    control: "Unknown VB-Audio/CABLE endpoints are surfaced as foreign drivers instead of becoming bridge providers.",
+  },
+  {
+    id: "B2",
+    status: "known-limitation",
+    control: "The free VB-CABLE driver provides one cable; inbound must use process loopback or a backup provider.",
+  },
+  {
+    id: "X1",
+    status: "implemented",
+    control: "Setup opens the vendor download page and does not silently install drivers or change default devices.",
+  },
+];
+
+const WINDOWS_PROVIDERS: ReadonlyArray<VirtualAudioProvider> = [
+  {
+    id: "vbcable-free",
+    name: "VB-CABLE",
+    platform: "win32",
+    role: "primary",
+    mode: "outbound-only",
+    runtime: "passive",
+    devices: [
+      {
+        leg: "outbound",
+        driverBundle: "VB-CABLE",
+        deviceName: "CABLE Output (VB-Audio Virtual Cable)",
+      },
+    ],
+  },
+  {
+    id: "voicemeeter-banana",
+    name: "Voicemeeter Banana",
+    platform: "win32",
+    role: "backup",
+    mode: "full",
+    runtime: "requires-engine",
+    devices: [
+      {
+        leg: "outbound",
+        driverBundle: "Voicemeeter AUX",
+        deviceName: "VoiceMeeter Aux Output (VB-Audio VoiceMeeter AUX VAIO)",
+      },
+      {
+        leg: "inbound",
+        driverBundle: "Voicemeeter VAIO",
+        deviceName: "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)",
+      },
+    ],
+  },
+];
+
+function withProvider(
+  provider: VirtualAudioProvider,
+  device: Omit<VirtualAudioDevice, "installed" | "providerId" | "providerName" | "providerRole">,
+  installed: boolean,
+): VirtualAudioDevice {
+  return {
+    ...device,
+    installed,
+    providerId: provider.id,
+    providerName: provider.name,
+    providerRole: provider.role,
+  };
+}
 
 /** Bundles that belong to something else, so they are reported rather than used. */
 function isOurs(bundle: string): boolean {
@@ -74,7 +218,131 @@ function readHalDirectory(): string[] {
   }
 }
 
+function windowsBuildNumber(): number {
+  return Number.parseInt(os.release().split(".").at(-1) ?? "0", 10);
+}
+
+function normalizeDeviceName(name: string): string {
+  return name.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function includesDeviceName(names: ReadonlySet<string>, expected: string): boolean {
+  const needle = normalizeDeviceName(expected.split(" (")[0] ?? expected);
+  for (const name of names) {
+    if (normalizeDeviceName(name).includes(needle)) return true;
+  }
+  return false;
+}
+
+function readWindowsAudioEndpointNames(): string[] {
+  const script = String.raw`
+$ErrorActionPreference = "SilentlyContinue"
+$roots = @(
+  "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture",
+  "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render"
+)
+$names = foreach ($root in $roots) {
+  Get-ChildItem -LiteralPath $root | Where-Object {
+    try { (Get-ItemProperty -LiteralPath $_.PSPath -Name DeviceState).DeviceState -eq 1 } catch { $false }
+  } | ForEach-Object {
+    $props = Get-ItemProperty -LiteralPath (Join-Path $_.PSPath "Properties")
+    foreach ($property in $props.PSObject.Properties) {
+      if ($property.Value -is [string] -and $property.Value -match "VB-Audio|CABLE|VoiceMeeter|Voicemeeter") {
+        $property.Value
+      }
+    }
+  }
+}
+$names | Sort-Object -Unique | ConvertTo-Json -Compress
+`;
+
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", script], {
+    encoding: "utf8",
+    timeout: 2500,
+    windowsHide: true,
+  });
+  if (result.status !== 0 || !result.stdout.trim()) return [];
+
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return (Array.isArray(parsed) ? parsed : [parsed]).filter(
+      (value): value is string => typeof value === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function describeWindowsVirtualAudioForEndpoints(
+  endpointNamesList: readonly string[],
+  buildNumber: number,
+): VirtualAudioStatus {
+  const endpointNames = new Set(endpointNamesList);
+  const providers = WINDOWS_PROVIDERS.map((provider) => {
+    const devices = provider.devices.map((device) =>
+      withProvider(provider, device, includesDeviceName(endpointNames, device.deviceName)),
+    );
+    return { provider, devices, ready: devices.every((device) => device.installed) };
+  });
+
+  const primaryProvider = providers.find(({ provider }) => provider.role === "primary");
+  if (!primaryProvider) {
+    throw new Error("Windows virtual audio provider registry has no primary provider.");
+  }
+  const outboundProvider = providers.find(
+    ({ provider, ready }) => provider.role === "primary" && provider.mode === "outbound-only" && ready,
+  );
+  const installedBackupProvider = providers.find(
+    ({ provider, ready }) =>
+      provider.role === "backup" && provider.runtime === "requires-engine" && ready,
+  );
+  const processLoopback = buildNumber >= WINDOWS_PROCESS_LOOPBACK_MIN_BUILD;
+  const detectedProvider =
+    (processLoopback ? outboundProvider : undefined) ??
+    installedBackupProvider ??
+    outboundProvider ??
+    primaryProvider;
+  const mode = outboundProvider && processLoopback
+    ? "outbound-only"
+    : installedBackupProvider
+      ? "installed-not-running"
+      : "caption-only";
+
+  return {
+    platform: "win32",
+    supported: true,
+    devices: detectedProvider.devices,
+    ready: false,
+    bridgeMode: mode,
+    recommendedProviderId: primaryProvider.provider.id,
+    capabilities: {
+      fullBridge: false,
+      outboundOnly: mode === "outbound-only",
+      captionOnly: true,
+      processLoopback,
+      processLoopbackRuntime: "not-wired",
+      minWindowsProcessLoopbackBuild: WINDOWS_PROCESS_LOOPBACK_MIN_BUILD,
+    },
+    riskControls: [...WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS],
+    foreignDrivers: Array.from(endpointNames).filter(
+      (name) =>
+        !WINDOWS_PROVIDERS.some((provider) =>
+          provider.devices.some((device) => includesDeviceName(new Set([name]), device.deviceName)),
+        ),
+    ),
+  };
+}
+
+function detectWindowsVirtualAudio(): VirtualAudioStatus {
+  return describeWindowsVirtualAudioForEndpoints(
+    readWindowsAudioEndpointNames(),
+    windowsBuildNumber(),
+  );
+}
+
 export function detectVirtualAudio(): VirtualAudioStatus {
+  if (process.platform === "win32") return detectWindowsVirtualAudio();
+
   if (process.platform !== "darwin") {
     // Windows needs VB-CABLE, whose redistribution is licensed, and detection there reads the
     // device registry rather than a directory. Reporting `supported: false` keeps the UI honest
@@ -84,6 +352,15 @@ export function detectVirtualAudio(): VirtualAudioStatus {
       supported: false,
       devices: [],
       ready: false,
+      bridgeMode: "caption-only",
+      capabilities: {
+        fullBridge: false,
+        outboundOnly: false,
+        captionOnly: true,
+        processLoopback: false,
+        processLoopbackRuntime: "not-wired",
+      },
+      riskControls: [],
       foreignDrivers: [],
     };
   }
@@ -99,18 +376,32 @@ export function detectVirtualAudio(): VirtualAudioStatus {
     supported: true,
     devices,
     ready: devices.every((device) => device.installed),
+    bridgeMode: devices.every((device) => device.installed) ? "full" : "caption-only",
+    recommendedProviderId: "blackhole",
+    capabilities: {
+      fullBridge: devices.every((device) => device.installed),
+      outboundOnly: devices.every((device) => device.installed),
+      captionOnly: true,
+      processLoopback: false,
+      processLoopbackRuntime: "not-wired",
+    },
+    riskControls: [],
     foreignDrivers: present.filter((bundle) => !isOurs(bundle)),
   };
 }
 
 /** Whether any virtual audio driver at all is on the machine. */
 export function hasAnyVirtualDriver(): boolean {
+  if (process.platform === "win32") return readWindowsAudioEndpointNames().length > 0;
   if (process.platform !== "darwin") return false;
   return readHalDirectory().length > 0;
 }
 
 /** Where BlackHole is published. Its GitHub releases carry no installer package. */
 export const BLACKHOLE_DOWNLOAD_PAGE = "https://existential.audio/blackhole/";
+
+/** Where VB-Audio publishes the free single-cable Windows driver. */
+export const VBCABLE_DOWNLOAD_PAGE = "https://vb-audio.com/Cable/";
 
 /**
  * The Homebrew command that installs both legs.

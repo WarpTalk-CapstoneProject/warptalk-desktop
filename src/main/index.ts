@@ -24,6 +24,7 @@ import { AudioRuntimeService } from "./audio-runtime";
 import {
   BLACKHOLE_BREW_COMMAND,
   BLACKHOLE_DOWNLOAD_PAGE,
+  VBCABLE_DOWNLOAD_PAGE,
   detectVirtualAudio,
   hasHomebrew,
 } from "./virtual-audio";
@@ -349,6 +350,28 @@ async function openTranscriptWindow(roomId: string): Promise<void> {
  * arrives unexplained is one people are right to refuse.
  */
 async function runVirtualAudioInstaller(): Promise<{ started: boolean; reason?: string }> {
+  if (process.platform === "win32") {
+    const { response } = await dialog.showMessageBox({
+      type: "info",
+      message: "Install the Windows audio bridge cable",
+      detail:
+        "Windows bridge mode uses the free VB-CABLE driver for the outbound leg. Install it from " +
+        "VB-Audio, reboot if the installer asks, then choose CABLE Output as the microphone in " +
+        "your meeting app.\n\n" +
+        "WarpTalk does not install a driver silently or change your Windows default audio device.",
+      buttons: ["Open the download page", "Not now"],
+      cancelId: 1,
+      defaultId: 0,
+    });
+
+    if (response === 1) {
+      return { started: false, reason: "declined" };
+    }
+
+    openExternalUrl(VBCABLE_DOWNLOAD_PAGE);
+    return { started: true, reason: "download-page-opened" };
+  }
+
   if (process.platform !== "darwin") {
     return { started: false, reason: "unsupported-platform" };
   }
