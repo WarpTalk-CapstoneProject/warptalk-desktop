@@ -16,7 +16,16 @@ export interface WindowsLoopbackRuntimeAdapter {
   pcmToTrackBridgeReady: boolean;
   /** True only when no-packet gaps are padded with silence before STT publication. */
   silencePaddingReady: boolean;
-  /** True only after window handle -> renderer PID -> root browser PID has been implemented. */
+  /**
+   * True once a desktop source id can be turned into the PID the loopback API needs.
+   *
+   * That is a single step, not the walk this comment used to describe: measured on Chrome 37
+   * processes deep, `GetWindowThreadProcessId` on a top-level browser window returns the browser
+   * process itself, because Chromium creates its windows there rather than in a renderer. No
+   * parent chain has to be climbed. Kept as a flag anyway — a browser that does hand its window
+   * to a child process would need one, and the gate should fail closed rather than capture the
+   * wrong tree.
+   */
   targetProcessResolverReady: boolean;
   resolveTargetProcessId?: (sourceId: string) => Promise<number | null>;
   start: (request: WindowsLoopbackResolvedCaptureRequest) => Promise<void>;

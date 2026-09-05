@@ -65,7 +65,7 @@ export interface VirtualAudioStatus {
 }
 
 export interface VirtualAudioRiskControl {
-  id: "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "B1" | "B2" | "X1";
+  id: "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "R9" | "B1" | "B2" | "X1";
   status: "mitigated" | "guarded" | "implemented" | "known-limitation" | "requires-runtime";
   control: string;
 }
@@ -134,6 +134,22 @@ const WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS: ReadonlyArray<VirtualAudioRiskC
     id: "R8",
     status: "guarded",
     control: "Start is blocked until a selected Meet window resolves to the root browser process.",
+  },
+  {
+    id: "R9",
+    status: "known-limitation",
+    /**
+     * Measured, not assumed: two tabs of one browser instance playing 440 Hz and 1000 Hz were both
+     * captured at identical amplitude by INCLUDE_TARGET_PROCESS_TREE on the browser process. The
+     * browser renders every tab through one audio service inside that tree, so the tree is the
+     * finest grain this API offers. R1 is still mitigated — the dub plays from our own process
+     * tree and stays out — but a second noisy tab lands in the inbound leg and reaches the
+     * pipeline as if the far side had said it.
+     *
+     * The only real fix is to give the meeting its own browser instance: a separate user-data-dir
+     * gets its own browser process, and its tree then contains nothing else.
+     */
+    control: "Process loopback isolates the browser from the rest of the machine, not tab from tab; other audible tabs in the same browser instance are captured too.",
   },
   {
     id: "B1",
