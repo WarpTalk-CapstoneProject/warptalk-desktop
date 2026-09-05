@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld("warptalk", {
   getPlatform: (): string => process.platform,
   getRuntimeCapability: (): Promise<DesktopRuntimeCapability> =>
     ipcRenderer.invoke("runtime:capability"),
+  listWindowsLoopbackSources: () =>
+    ipcRenderer.invoke("audio:list-loopback-sources"),
 
   startAudioCapture: (request?: unknown) =>
     ipcRenderer.invoke("audio:start-capture", request),

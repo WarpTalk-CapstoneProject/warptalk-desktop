@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { evaluateWindowsLoopbackStart } from "../windows-loopback-runtime.ts";
+import { evaluateWindowsLoopbackStart, WindowsLoopbackRuntime } from "../windows-loopback-runtime.ts";
 
 function readyStatus(overrides = {}) {
   return {
@@ -149,6 +149,20 @@ test("Windows loopback start rejects missing target process resolver", () => {
   });
 });
 
+test("Windows loopback start rejects a selected source when the resolver is not wired", () => {
+  const result = evaluateWindowsLoopbackStart(
+    readyStatus(),
+    readyAdapter({ targetProcessResolverReady: false }),
+    { ...READY_REQUEST, targetProcessId: undefined, sourceId: "window:123456:0" },
+  );
+
+  assert.deepEqual(result, {
+    started: false,
+    riskId: "R8",
+    reason: "target-process-resolver-not-ready",
+  });
+});
+
 test("Windows loopback start rejects missing PCM-to-track bridge", () => {
   const result = evaluateWindowsLoopbackStart(
     readyStatus(),
@@ -181,4 +195,48 @@ test("Windows loopback start succeeds only after every risk gate is satisfied", 
   const result = evaluateWindowsLoopbackStart(readyStatus(), readyAdapter(), READY_REQUEST);
 
   assert.deepEqual(result, { started: true });
+});
+
+test("Windows loopback runtime resolves a selected source before starting capture", async () => {
+  let startedWith = null;
+  const runtime = new WindowsLoopbackRuntime(
+    readyAdapter({
+      resolveTargetProcessId: async (sourceId) => (sourceId === "window:123456:0" ? 4242 : null),
+      start: async (request) => {
+        startedWith = request;
+      },
+    }),
+    () => readyStatus(),
+  );
+
+  const result = await runtime.start({
+    sourceId: "window:123456:0",
+    consentGranted: true,
+    includeTargetProcessTree: true,
+  });
+
+  assert.deepEqual(result, { started: true });
+  assert.deepEqual(startedWith, {
+    sourceId: "window:123456:0",
+    consentGranted: true,
+    includeTargetProcessTree: true,
+    targetProcessId: 4242,
+  });
+});
+
+test("Windows loopback runtime fails closed when a selected source cannot resolve to a process", async () => {
+  const runtime = new WindowsLoopbackRuntime(
+    readyAdapter({
+      resolveTargetProcessId: async () => null,
+    }),
+    () => readyStatus(),
+  );
+
+  const result = await runtime.start({
+    sourceId: "window:123456:0",
+    consentGranted: true,
+    includeTargetProcessTree: true,
+  });
+
+  assert.deepEqual(result, { started: false, riskId: "R8", reason: "target-source-unresolved" });
 });

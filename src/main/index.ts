@@ -23,6 +23,10 @@ import path from "path";
 import { AudioRuntimeService } from "./audio-runtime";
 import { WindowsLoopbackRuntime } from "./windows-loopback-runtime";
 import {
+  describeWindowsLoopbackSource,
+  resolveWindowOwnerProcessId,
+} from "./windows-loopback-sources";
+import {
   BLACKHOLE_BREW_COMMAND,
   BLACKHOLE_DOWNLOAD_PAGE,
   VBCABLE_DOWNLOAD_PAGE,
@@ -41,7 +45,17 @@ let tray: Tray | null = null;
  */
 let resolvedWebOrigin: string | null = null;
 const audioRuntime = new AudioRuntimeService();
-const windowsLoopbackRuntime = new WindowsLoopbackRuntime();
+const windowsLoopbackRuntime = new WindowsLoopbackRuntime({
+  electronLoopbackApiReady: false,
+  pcmToTrackBridgeReady: false,
+  silencePaddingReady: false,
+  targetProcessResolverReady: true,
+  resolveTargetProcessId: async (sourceId) => resolveWindowOwnerProcessId(sourceId),
+  start: async () => {
+    throw new Error("Windows loopback capture adapter is not wired.");
+  },
+  stop: async () => undefined,
+});
 const webRuntime = new WebRuntimeService();
 const APP_NAME = "WarpTalk";
 const APP_MODEL_ID = "com.warptalk.desktop";
@@ -84,6 +98,22 @@ function registerIpcHandlers(): void {
     windowsLoopbackRuntime.start(request),
   );
   ipcMain.handle("audio:stop-capture", async () => windowsLoopbackRuntime.stop());
+  ipcMain.handle("audio:list-loopback-sources", async () => {
+    if (process.platform !== "win32") return [];
+
+    let sources;
+    try {
+      sources = await desktopCapturer.getSources({
+        types: ["window"],
+        thumbnailSize: { width: 0, height: 0 },
+      });
+    } catch (error) {
+      console.error("Could not enumerate Windows loopback window sources:", error);
+      return [];
+    }
+
+    return sources.map((source) => describeWindowsLoopbackSource(source));
+  });
   ipcMain.handle("translationRoom:join", async () => undefined);
   ipcMain.handle("translationRoom:leave", async () => undefined);
 

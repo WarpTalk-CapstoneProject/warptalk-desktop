@@ -7,6 +7,7 @@ export interface WarpTalkAPI {
   getVersion: () => Promise<string>;
   getPlatform: () => string;
   getRuntimeCapability: () => Promise<DesktopRuntimeCapability>;
+  listWindowsLoopbackSources: () => Promise<WindowsLoopbackSource[]>;
   startAudioCapture: (request?: WindowsLoopbackCaptureRequest) => Promise<WindowsLoopbackStartResult>;
   stopAudioCapture: () => Promise<void>;
   joinTranslationRoom: (translationRoomId: string) => Promise<void>;
@@ -73,6 +74,8 @@ export interface VirtualAudioInstallResult {
 }
 
 export interface WindowsLoopbackCaptureRequest {
+  /** DesktopCapturer window source chosen by the user; resolved to the owner process in main. */
+  sourceId?: string;
   /** The root browser process that owns the selected Google Meet window. */
   targetProcessId?: number;
   /** Must be true: false means EXCLUDE_TARGET_PROCESS_TREE and captures the wrong side. */
@@ -92,12 +95,21 @@ export type WindowsLoopbackStartResult =
         | "process-loopback-unsupported"
         | "consent-required"
         | "target-process-required"
+        | "target-source-unresolved"
         | "include-target-tree-required"
         | "electron-loopback-api-not-ready"
         | "pcm-to-track-bridge-not-ready"
         | "silence-padding-not-ready"
         | "target-process-resolver-not-ready";
     };
+
+export interface WindowsLoopbackSource {
+  id: string;
+  name: string;
+  windowHandle?: number;
+  ownerProcessId?: number;
+  likelyMeetingWindow: boolean;
+}
 
 export interface DesktopRuntimeCapability {
   deviceIdHash: string;

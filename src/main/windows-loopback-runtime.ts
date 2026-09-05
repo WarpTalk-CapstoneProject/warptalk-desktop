@@ -4,6 +4,10 @@ import type {
   WindowsLoopbackStartResult,
 } from "../shared/types.ts";
 
+export type WindowsLoopbackResolvedCaptureRequest =
+  Required<Pick<WindowsLoopbackCaptureRequest, "consentGranted" | "includeTargetProcessTree" | "targetProcessId">> &
+    Pick<WindowsLoopbackCaptureRequest, "sourceId">;
+
 export interface WindowsLoopbackRuntimeAdapter {
   /** True only when Electron/native capture can avoid chromeMediaSource:'desktop'. */
   electronLoopbackApiReady: boolean;
@@ -13,7 +17,8 @@ export interface WindowsLoopbackRuntimeAdapter {
   silencePaddingReady: boolean;
   /** True only after window handle -> renderer PID -> root browser PID has been implemented. */
   targetProcessResolverReady: boolean;
-  start: (request: Required<WindowsLoopbackCaptureRequest>) => Promise<void>;
+  resolveTargetProcessId?: (sourceId: string) => Promise<number | null>;
+  start: (request: WindowsLoopbackResolvedCaptureRequest) => Promise<void>;
   stop: () => Promise<void>;
 }
 
@@ -50,6 +55,9 @@ export function evaluateWindowsLoopbackStart(
     return missing("B2", "process-loopback-unsupported");
   }
   if (!request.consentGranted) return missing("R5", "consent-required");
+  if (request.sourceId && !adapter.targetProcessResolverReady) {
+    return missing("R8", "target-process-resolver-not-ready");
+  }
   if (!Number.isInteger(request.targetProcessId) || (request.targetProcessId ?? 0) <= 0) {
     return missing("R8", "target-process-required");
   }
@@ -73,20 +81,40 @@ export function evaluateWindowsLoopbackStart(
 
 export class WindowsLoopbackRuntime {
   private adapter: WindowsLoopbackRuntimeAdapter;
+  private statusProvider: () => VirtualAudioStatus;
 
-  constructor(adapter: WindowsLoopbackRuntimeAdapter = MISSING_RUNTIME_ADAPTER) {
+  constructor(
+    adapter: WindowsLoopbackRuntimeAdapter = MISSING_RUNTIME_ADAPTER,
+    statusProvider: () => VirtualAudioStatus = detectVirtualAudio,
+  ) {
     this.adapter = adapter;
+    this.statusProvider = statusProvider;
   }
 
   async start(request: WindowsLoopbackCaptureRequest = {}): Promise<WindowsLoopbackStartResult> {
-    const status = detectVirtualAudio();
-    const decision = evaluateWindowsLoopbackStart(status, this.adapter, request);
+    const status = this.statusProvider();
+    const resolvedRequest = { ...request };
+
+    if (
+      !Number.isInteger(resolvedRequest.targetProcessId) &&
+      resolvedRequest.sourceId &&
+      this.adapter.targetProcessResolverReady
+    ) {
+      resolvedRequest.targetProcessId =
+        (await this.adapter.resolveTargetProcessId?.(resolvedRequest.sourceId)) ?? undefined;
+      if (!resolvedRequest.targetProcessId) {
+        return missing("R8", "target-source-unresolved");
+      }
+    }
+
+    const decision = evaluateWindowsLoopbackStart(status, this.adapter, resolvedRequest);
     if (!decision.started) return decision;
 
     await this.adapter.start({
       consentGranted: true,
       includeTargetProcessTree: true,
-      targetProcessId: request.targetProcessId!,
+      sourceId: resolvedRequest.sourceId,
+      targetProcessId: resolvedRequest.targetProcessId!,
     });
     return { started: true };
   }
