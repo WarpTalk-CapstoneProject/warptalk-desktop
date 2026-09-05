@@ -26,7 +26,7 @@ import {
   WindowsLoopbackRuntime,
 } from "./windows-loopback-runtime";
 import {
-  describeWindowsLoopbackSource,
+  describeWindowsLoopbackSources,
   resolveWindowOwnerProcessId,
 } from "./windows-loopback-sources";
 import {
@@ -112,7 +112,7 @@ function registerIpcHandlers(): void {
       return [];
     }
 
-    return sources.map((source) => describeWindowsLoopbackSource(source));
+    return describeWindowsLoopbackSources(sources);
   });
   ipcMain.handle("translationRoom:join", async () => undefined);
   ipcMain.handle("translationRoom:leave", async () => undefined);
