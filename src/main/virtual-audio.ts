@@ -289,9 +289,19 @@ $names | Sort-Object -Unique | ConvertTo-Json -Compress
   }
 }
 
+/**
+ * `runtimeReady` is asked for rather than inferred.
+ *
+ * The build number says the OS *offers* process loopback; it says nothing about whether the native
+ * addon loaded, the PCM bridge exists, or a window can be resolved to a PID. Those live in the
+ * runtime adapter, and the caller that owns it passes the answer in. Defaulting to false keeps the
+ * conservative reading for anyone who cannot answer: an under-reported capability costs a rung, an
+ * over-reported one costs a silent half-dead meeting.
+ */
 export function describeWindowsVirtualAudioForEndpoints(
   endpointNamesList: readonly string[],
   buildNumber: number,
+  runtimeReady = false,
 ): VirtualAudioStatus {
   const endpointNames = new Set(endpointNamesList);
   const providers = WINDOWS_PROVIDERS.map((provider) => {
@@ -336,7 +346,7 @@ export function describeWindowsVirtualAudioForEndpoints(
       outboundOnly: mode === "outbound-only",
       captionOnly: true,
       processLoopback,
-      processLoopbackRuntime: processLoopback ? "available" : "not-wired",
+      processLoopbackRuntime: processLoopback && runtimeReady ? "available" : "not-wired",
       minWindowsProcessLoopbackBuild: WINDOWS_PROCESS_LOOPBACK_MIN_BUILD,
     },
     riskControls: [...WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS],
@@ -349,15 +359,22 @@ export function describeWindowsVirtualAudioForEndpoints(
   };
 }
 
-function detectWindowsVirtualAudio(): VirtualAudioStatus {
+function detectWindowsVirtualAudio(runtimeReady: boolean): VirtualAudioStatus {
   return describeWindowsVirtualAudioForEndpoints(
     readWindowsAudioEndpointNames(),
     windowsBuildNumber(),
+    runtimeReady,
   );
 }
 
-export function detectVirtualAudio(): VirtualAudioStatus {
-  if (process.platform === "win32") return detectWindowsVirtualAudio();
+/**
+ * `runtimeReady` comes from the caller that owns the loopback runtime, because this module cannot
+ * import it without a cycle — the runtime already imports `detectVirtualAudio` as its own default
+ * status source. Omitting it reports the capture path as not wired, which is the reading that fails
+ * closed.
+ */
+export function detectVirtualAudio(runtimeReady = false): VirtualAudioStatus {
+  if (process.platform === "win32") return detectWindowsVirtualAudio(runtimeReady);
 
   if (process.platform !== "darwin") {
     // Windows needs VB-CABLE, whose redistribution is licensed, and detection there reads the

@@ -119,7 +119,12 @@ function registerIpcHandlers(): void {
 
   // External-bridge meetings: which virtual audio devices exist, and a window that shows the
   // transcript while the user is looking at Google Meet rather than at WarpTalk.
-  ipcMain.handle("bridge:virtual-audio-status", () => detectVirtualAudio());
+  // The runtime is the only thing that knows whether capture could actually start, and the web tier
+  // picker chooses the loopback rung from the answer — so it is asked here rather than guessed from
+  // the Windows build number.
+  ipcMain.handle("bridge:virtual-audio-status", () =>
+    detectVirtualAudio(windowsLoopbackRuntime.isReady()),
+  );
   ipcMain.handle("bridge:install-virtual-audio", () => runVirtualAudioInstaller());
   ipcMain.handle("bridge:open-transcript-window", async (_event, roomId: string) => {
     await openTranscriptWindow(roomId);

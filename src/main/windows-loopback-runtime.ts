@@ -32,6 +32,23 @@ export interface WindowsLoopbackRuntimeAdapter {
   stop: () => Promise<void>;
 }
 
+/**
+ * Whether every leg of the capture path is actually in place.
+ *
+ * Split out because `capabilities.processLoopbackRuntime` used to be derived from the Windows build
+ * number alone — a machine new enough for the API reported "available" even when nothing could
+ * capture. The web tier picker reads that field to choose the loopback rung, so the lie put it one
+ * rung too high and the meeting went silent in one direction with nothing to explain why.
+ */
+export function isLoopbackAdapterReady(adapter: WindowsLoopbackRuntimeAdapter): boolean {
+  return (
+    adapter.electronLoopbackApiReady &&
+    adapter.pcmToTrackBridgeReady &&
+    adapter.silencePaddingReady &&
+    adapter.targetProcessResolverReady
+  );
+}
+
 export interface LoopbackCaptureNativeModule {
   default?: {
     LoopbackCapture: new () => LoopbackCaptureNativeSession;
@@ -200,5 +217,10 @@ export class WindowsLoopbackRuntime {
 
   async stop(): Promise<void> {
     await this.adapter.stop();
+  }
+
+  /** Whether this runtime could actually capture right now, for callers building a status. */
+  isReady(): boolean {
+    return isLoopbackAdapterReady(this.adapter);
   }
 }

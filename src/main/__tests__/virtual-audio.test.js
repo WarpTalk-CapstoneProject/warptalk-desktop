@@ -10,6 +10,7 @@ test("Windows recommends the free cable when it is installed on a process-loopba
   const status = describeWindowsVirtualAudioForEndpoints(
     ["CABLE Output (VB-Audio Virtual Cable)"],
     SUPPORTED_BUILD,
+    true,
   );
 
   assert.equal(status.bridgeMode, "outbound-only");
@@ -41,6 +42,46 @@ test("Windows exposes every free-cable loopback risk control in code", () => {
   }
   assert.equal(status.riskControls?.find((risk) => risk.id === "B1")?.status, "implemented");
   assert.equal(status.riskControls?.find((risk) => risk.id === "X1")?.status, "implemented");
+});
+
+test("a new enough Windows does not by itself make the capture path available", () => {
+  // The build number says the OS offers process loopback. It says nothing about whether the native
+  // addon loaded or a window can be resolved to a PID. Reporting "available" from the build alone
+  // put the web tier picker one rung too high, and the meeting went silent in one direction with
+  // nothing on screen to explain it.
+  const notWired = describeWindowsVirtualAudioForEndpoints(
+    ["CABLE Output (VB-Audio Virtual Cable)"],
+    SUPPORTED_BUILD,
+    false,
+  );
+  const wired = describeWindowsVirtualAudioForEndpoints(
+    ["CABLE Output (VB-Audio Virtual Cable)"],
+    SUPPORTED_BUILD,
+    true,
+  );
+
+  assert.equal(notWired.capabilities?.processLoopback, true);
+  assert.equal(notWired.capabilities?.processLoopbackRuntime, "not-wired");
+  assert.equal(wired.capabilities?.processLoopbackRuntime, "available");
+
+  // Omitting the argument has to read as not wired: a caller that cannot answer must cost a rung,
+  // never claim one.
+  const unanswered = describeWindowsVirtualAudioForEndpoints(
+    ["CABLE Output (VB-Audio Virtual Cable)"],
+    SUPPORTED_BUILD,
+  );
+  assert.equal(unanswered.capabilities?.processLoopbackRuntime, "not-wired");
+});
+
+test("an old Windows stays not-wired even when the runtime is fully wired", () => {
+  const status = describeWindowsVirtualAudioForEndpoints(
+    ["CABLE Output (VB-Audio Virtual Cable)"],
+    UNSUPPORTED_BUILD,
+    true,
+  );
+
+  assert.equal(status.capabilities?.processLoopback, false);
+  assert.equal(status.capabilities?.processLoopbackRuntime, "not-wired");
 });
 
 test("tab-level contamination is recorded as a limitation, not as an isolation claim", () => {
