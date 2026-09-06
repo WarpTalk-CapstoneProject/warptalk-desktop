@@ -82,6 +82,43 @@ export function isLikelyMeetingWindow(name: string): boolean {
 }
 
 /**
+ * Whether a window title says a Google Meet call is on screen RIGHT NOW.
+ *
+ * Deliberately not `isLikelyMeetingWindow`, which is one character class wider and matches a bare
+ * "chrome". That width is correct where it is used — the loopback picker lists browser windows for
+ * the user to choose between, and a Chrome window with no Meet in it is still a legitimate thing to
+ * offer. It is wrong here: presence detection that fires on any browser window would report a
+ * meeting whenever the user has a browser open at all, which is always.
+ *
+ * The two title shapes Meet produces both have to match. A named call carries the words through
+ * the page title ("Daily standup - Google Meet"); an unnamed one is just the room code after a
+ * dash, and Meet writes that dash as an en dash, so the class has to admit all three.
+ */
+const MEET_WINDOW_PATTERN =
+  /(google meet|meet\.google\.com|\bmeet\s*[-–—]\s*[a-z]{3,4}-[a-z]{3,4}-[a-z]{3,4}\b)/i;
+
+/** The room code Meet puts in the title, when it is there at all. */
+const MEET_CODE_PATTERN = /\b([a-z]{3,4}-[a-z]{3,4}-[a-z]{3,4})\b/i;
+
+export function isMeetWindowTitle(title: string): boolean {
+  return MEET_WINDOW_PATTERN.test(title);
+}
+
+/**
+ * The room code, when the title happens to carry one.
+ *
+ * Absent far more often than present: Meet drops the code from the title as soon as the event has
+ * a name, which is every meeting WarpBot creates. So a caller that needs to know WHICH meeting has
+ * to be able to answer without this — the code is an upgrade on a match made some other way, never
+ * the thing the match depends on.
+ */
+export function extractMeetCode(title: string): string | null {
+  if (!isMeetWindowTitle(title)) return null;
+  const match = MEET_CODE_PATTERN.exec(title);
+  return match ? match[1].toLowerCase() : null;
+}
+
+/**
  * Every process's main window, in one shell round trip.
  *
  * `Get-Process` already carries MainWindowHandle, so this needs no `Add-Type` and no C# compile —

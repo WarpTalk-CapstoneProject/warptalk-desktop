@@ -19,8 +19,13 @@ export interface WarpTalkAPI {
   openExternal: (url: string) => Promise<void>;
   getVirtualAudioStatus: () => Promise<VirtualAudioStatus>;
   installVirtualAudio: () => Promise<VirtualAudioInstallResult>;
-  openTranscriptWindow: (roomId: string) => Promise<void>;
+  openTranscriptWindow: (roomId: string | null) => Promise<void>;
+  activateRoom: (roomId: string) => Promise<void>;
+  onRoomActivated: (callback: (roomId: string) => void) => () => void;
   closeTranscriptWindow: () => Promise<void>;
+  watchMeetPresence: () => Promise<void>;
+  unwatchMeetPresence: () => Promise<void>;
+  onMeetPresence: (callback: (presence: MeetPresence) => void) => () => void;
   minimize: () => void;
   maximize: () => void;
   close: () => void;
@@ -111,6 +116,21 @@ export interface WindowsLoopbackSource {
   windowHandle?: number;
   ownerProcessId?: number;
   likelyMeetingWindow: boolean;
+}
+
+/**
+ * One observation of whether a Google Meet call is on screen.
+ *
+ * Raw on purpose. It says what a window title showed at a moment; it does not say which meeting
+ * that is, whether the user has joined rather than sitting in the green room, or whether the
+ * widget should be up. Those are decisions, they need tuning, and they live on the web side where
+ * they can be tested without a desktop build.
+ */
+export interface MeetPresence {
+  meetWindowVisible: boolean;
+  /** Present only when the title carried a room code, which a named meeting never does. */
+  meetCode?: string;
+  observedAtMs: number;
 }
 
 export interface WindowsLoopbackPcmChunk {

@@ -8,6 +8,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 import type {
   DesktopRuntimeCapability,
+  MeetPresence,
   WindowsLoopbackPcmChunk,
   VirtualAudioInstallResult,
   VirtualAudioStatus,
@@ -53,10 +54,26 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.invoke("bridge:virtual-audio-status"),
   installVirtualAudio: (): Promise<VirtualAudioInstallResult> =>
     ipcRenderer.invoke("bridge:install-virtual-audio"),
-  openTranscriptWindow: (roomId: string): Promise<void> =>
+  openTranscriptWindow: (roomId: string | null): Promise<void> =>
     ipcRenderer.invoke("bridge:open-transcript-window", roomId),
+  activateRoom: (roomId: string): Promise<void> =>
+    ipcRenderer.invoke("bridge:activate-room", roomId),
+  onRoomActivated: (callback: (roomId: string) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, roomId: string) => callback(roomId);
+    ipcRenderer.on("bridge:room-activated", listener);
+    return () => ipcRenderer.off("bridge:room-activated", listener);
+  },
   closeTranscriptWindow: (): Promise<void> =>
     ipcRenderer.invoke("bridge:close-transcript-window"),
+  watchMeetPresence: (): Promise<void> =>
+    ipcRenderer.invoke("bridge:watch-meet-presence"),
+  unwatchMeetPresence: (): Promise<void> =>
+    ipcRenderer.invoke("bridge:unwatch-meet-presence"),
+  onMeetPresence: (callback: (presence: MeetPresence) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, presence: MeetPresence) => callback(presence);
+    ipcRenderer.on("bridge:meet-presence", listener);
+    return () => ipcRenderer.off("bridge:meet-presence", listener);
+  },
 
   minimize: (): void => ipcRenderer.send("window:minimize"),
   maximize: (): void => ipcRenderer.send("window:maximize"),

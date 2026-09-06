@@ -25,6 +25,8 @@ import {
   createNativeWindowsLoopbackAdapter,
   WindowsLoopbackRuntime,
 } from "./windows-loopback-runtime";
+import { MeetPresenceWatcher } from "./meet-presence";
+import type { MeetPresence } from "../shared/types";
 import {
   describeWindowsLoopbackSources,
   resolveWindowOwnerProcessId,
@@ -48,6 +50,33 @@ let tray: Tray | null = null;
  */
 let resolvedWebOrigin: string | null = null;
 const audioRuntime = new AudioRuntimeService();
+
+/**
+ * Watches for a Google Meet window so the bridge widget can appear when the user is actually in
+ * the call, rather than when they happen to open the room in WarpTalk.
+ *
+ * Armed by the renderer and only by the renderer: enumerating every window on the machine is not
+ * something to do on the chance a meeting might start. The renderer knows when a bridge meeting is
+ * near; main does not, and giving main that knowledge would mean giving it the API session too.
+ *
+ * On macOS the titles come back generic unless screen recording has been granted, so this reports
+ * "no Meet visible" there. That degrades to the schedule-only trigger, which needs no window
+ * knowledge at all - a worse answer, never a wrong one.
+ */
+const meetPresenceWatcher = new MeetPresenceWatcher({
+  listWindowTitles: async () => {
+    const sources = await desktopCapturer.getSources({
+      types: ["window"],
+      thumbnailSize: { width: 0, height: 0 },
+    });
+    return sources.map((source) => source.name);
+  },
+  onChange: (presence: MeetPresence) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("bridge:meet-presence", presence);
+    }
+  },
+});
 const windowsLoopbackRuntime = new WindowsLoopbackRuntime(
   createNativeWindowsLoopbackAdapter({
     publishPcmChunk: (chunk) => {
@@ -98,6 +127,14 @@ function registerIpcHandlers(): void {
     windowsLoopbackRuntime.start(request),
   );
   ipcMain.handle("audio:stop-capture", async () => windowsLoopbackRuntime.stop());
+  // Arm/disarm rather than a query: the renderer would otherwise have to poll main, which polls
+  // the OS, and two loops out of step is how a widget ends up a few seconds behind the meeting.
+  ipcMain.handle("bridge:watch-meet-presence", () => {
+    meetPresenceWatcher.arm();
+  });
+  ipcMain.handle("bridge:unwatch-meet-presence", () => {
+    meetPresenceWatcher.disarm();
+  });
   ipcMain.handle("audio:list-loopback-sources", async () => {
     if (process.platform !== "win32") return [];
 
@@ -130,8 +167,20 @@ function registerIpcHandlers(): void {
     return detectVirtualAudio(windowsLoopbackRuntime.isReady());
   });
   ipcMain.handle("bridge:install-virtual-audio", () => runVirtualAudioInstaller());
-  ipcMain.handle("bridge:open-transcript-window", async (_event, roomId: string) => {
-    await openTranscriptWindow(roomId);
+  ipcMain.handle("bridge:open-transcript-window", async (_event, roomId: string | null) => {
+    await openTranscriptWindow(roomId ?? null);
+  });
+  /**
+   * Flow 2's last mile: the offer window has made a room, and the SESSION has to start.
+   *
+   * It cannot start it itself. The translation pipeline lives in the main window's meeting
+   * session, keyed off a store held in sessionStorage - which is per-window, so nothing the
+   * popup writes is visible to the main window. Main relays instead.
+   */
+  ipcMain.handle("bridge:activate-room", (_event, roomId: string) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("bridge:room-activated", roomId);
+    }
   });
   ipcMain.handle("bridge:close-transcript-window", () => {
     transcriptWindow?.close();
@@ -303,6 +352,8 @@ async function createWindow(): Promise<void> {
 
 /** The compact transcript view the popup shows. Served by the web app, not by the local renderer. */
 const TRANSCRIPT_ROUTE = "/desktop-transcript";
+/** Flow 2: a Meet is on screen that no room accounts for. The window asks before anything is made. */
+const BRIDGE_OFFER_ROUTE = "/desktop-bridge-offer";
 
 /**
  * A second, small, always-on-top window carrying the live transcript.
@@ -315,16 +366,31 @@ const TRANSCRIPT_ROUTE = "/desktop-transcript";
  * first await, and the load is wrapped, because a window whose `closed` handler was registered
  * after an await leaves a destroyed object behind for the next caller to touch.
  */
-async function openTranscriptWindow(roomId: string): Promise<void> {
+async function openTranscriptWindow(roomId: string | null): Promise<void> {
+  if (!resolvedWebOrigin) {
+    console.error("Cannot open the transcript window before the web UI has loaded.");
+    return;
+  }
+
+  const target = roomId
+    ? `${resolvedWebOrigin}${TRANSCRIPT_ROUTE}/${encodeURIComponent(roomId)}`
+    : `${resolvedWebOrigin}${BRIDGE_OFFER_ROUTE}`;
+
   if (transcriptWindow && !transcriptWindow.isDestroyed()) {
     if (transcriptWindow.isMinimized()) transcriptWindow.restore();
     transcriptWindow.show();
     transcriptWindow.focus();
-    return;
-  }
-
-  if (!resolvedWebOrigin) {
-    console.error("Cannot open the transcript window before the web UI has loaded.");
+    // Reusing the window is not the same as leaving it where it was. The offer becomes a
+    // transcript the moment the user accepts, and this used to return early on the strength of a
+    // window merely existing - so the accepted offer stayed on screen, showing the question it had
+    // already been answered.
+    if (transcriptWindow.webContents.getURL() !== target) {
+      try {
+        await transcriptWindow.loadURL(target);
+      } catch (error) {
+        console.error("Failed to move the bridge window:", error);
+      }
+    }
     return;
   }
 
@@ -369,8 +435,6 @@ async function openTranscriptWindow(roomId: string): Promise<void> {
     openExternalUrl(url);
     return { action: "deny" };
   });
-
-  const target = `${resolvedWebOrigin}${TRANSCRIPT_ROUTE}/${encodeURIComponent(roomId)}`;
 
   try {
     await win.loadURL(target);
