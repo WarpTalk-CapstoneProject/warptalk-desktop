@@ -122,9 +122,13 @@ function registerIpcHandlers(): void {
   // The runtime is the only thing that knows whether capture could actually start, and the web tier
   // picker chooses the loopback rung from the answer — so it is asked here rather than guessed from
   // the Windows build number.
-  ipcMain.handle("bridge:virtual-audio-status", () =>
-    detectVirtualAudio(windowsLoopbackRuntime.isReady()),
-  );
+  // Awaited, because `isReady()` is now a probe result rather than a platform check. Asking
+  // before the probe settles would publish "not-wired" for a machine that is wired, and the web
+  // tier picker reads exactly this field to decide whether the loopback rung is on offer.
+  ipcMain.handle("bridge:virtual-audio-status", async () => {
+    await windowsLoopbackRuntime.whenProbed();
+    return detectVirtualAudio(windowsLoopbackRuntime.isReady());
+  });
   ipcMain.handle("bridge:install-virtual-audio", () => runVirtualAudioInstaller());
   ipcMain.handle("bridge:open-transcript-window", async (_event, roomId: string) => {
     await openTranscriptWindow(roomId);

@@ -27,6 +27,15 @@ export interface WindowsLoopbackRuntimeAdapter {
    * wrong tree.
    */
   targetProcessResolverReady: boolean;
+  /**
+   * Resolves once the adapter has finished deciding whether it is ready.
+   *
+   * An adapter that ASSERTS its readiness has nothing to wait for and omits this. One that PROBES
+   * — actually loading the native addon to find out — starts false and needs somewhere to say
+   * "ask me again in a moment", or every reader would race the probe and get the fail-closed
+   * answer regardless of the truth.
+   */
+  whenProbed?: Promise<void>;
   resolveTargetProcessId?: (sourceId: string) => Promise<number | null>;
   start: (request: WindowsLoopbackResolvedCaptureRequest) => Promise<void>;
   stop: () => Promise<void>;
@@ -85,6 +94,26 @@ const MISSING_RUNTIME_ADAPTER: WindowsLoopbackRuntimeAdapter = {
   stop: async () => undefined,
 };
 
+/**
+ * Readiness is PROBED here, not asserted.
+ *
+ * `electronLoopbackApiReady` used to be `platform === "win32"` and nothing more, which answers a
+ * question nobody asked: whether this is Windows, not whether the capture path exists. The two
+ * came apart badly. The native addon is loaded through a runtime `require` that a bundler cannot
+ * see through, so a build that inlined it left `import("loopback-capture")` throwing at call time
+ * — while this adapter went on reporting itself ready, `detectVirtualAudio` went on reporting
+ * `processLoopbackRuntime: "available"`, and the web tier picker went on selecting the
+ * loopback-bridge rung. The meeting then went silent in one direction and the failure surfaced
+ * only at start, several layers from its cause.
+ *
+ * That is precisely the lie `isLoopbackAdapterReady` was introduced to prevent, and the guarantee
+ * was never enforced: every test reaches the module through the injected `importLoopbackCapture`
+ * seam, so 35 green tests said nothing about the real import. So the adapter now attempts the
+ * import once, at construction, and reports what actually happened.
+ *
+ * It starts false and becomes true, never the reverse — an under-reported capability costs a rung,
+ * an over-reported one costs a silent half-dead meeting.
+ */
 export function createNativeWindowsLoopbackAdapter(
   options: NativeWindowsLoopbackAdapterOptions,
 ): WindowsLoopbackRuntimeAdapter {
@@ -94,16 +123,48 @@ export function createNativeWindowsLoopbackAdapter(
     (() => import("loopback-capture") as Promise<LoopbackCaptureNativeModule>);
   const platform = options.platform ?? process.platform;
 
+  let nativeModuleUsable = false;
+  /**
+   * One import, shared by the probe and by every later start.
+   *
+   * The probe and `start` used to call `importLoopbackCapture()` separately, which loads the
+   * native addon twice and — worse — makes them two independent facts: the probe could be waiting
+   * on one import while a start raced ahead on another. Resolving to null rather than rejecting
+   * keeps the failure a value, so `whenProbed` below never becomes a rejected promise that every
+   * caller would have to guard.
+   *
+   * Not attempted off Windows: the addon is Windows-only, and a rejected import there would be a
+   * fact about the platform we already know, reported as if it were a fault.
+   */
+  const nativeModule: Promise<LoopbackCaptureNativeModule | null> =
+    platform === "win32"
+      ? importLoopbackCapture()
+          .then((loopback) => {
+            // Present-and-constructible, not merely resolvable. A module that loads but exposes no
+            // LoopbackCapture fails at `new` a moment later, which is too late to pick a rung on.
+            nativeModuleUsable = Boolean(loopback.default?.LoopbackCapture ?? loopback.LoopbackCapture);
+            return loopback;
+          })
+          .catch(() => null)
+      : Promise.resolve(null);
+  const whenProbed = nativeModule.then(() => undefined);
+
   return {
-    electronLoopbackApiReady: platform === "win32",
+    // A getter, because this answer changes once — and the object is handed to readers that hold
+    // on to it, so a snapshot taken at construction would freeze the fail-closed value forever.
+    get electronLoopbackApiReady() {
+      return platform === "win32" && nativeModuleUsable;
+    },
     pcmToTrackBridgeReady: true,
     silencePaddingReady: true,
     targetProcessResolverReady: true,
+    whenProbed,
     resolveTargetProcessId: options.resolveTargetProcessId,
     start: async (request) => {
       activeCapture?.stop();
 
-      const loopback = await importLoopbackCapture();
+      const loopback = await nativeModule;
+      if (!loopback) throw new Error("loopback-capture could not be loaded.");
       const Capture = loopback.default?.LoopbackCapture ?? loopback.LoopbackCapture;
       if (!Capture) throw new Error("loopback-capture did not expose LoopbackCapture.");
 
@@ -184,6 +245,12 @@ export class WindowsLoopbackRuntime {
   }
 
   async start(request: WindowsLoopbackCaptureRequest = {}): Promise<WindowsLoopbackStartResult> {
+    // Before the gates, not after: a probing adapter reports false until its probe settles, so
+    // starting a capture in the first moments after launch would be refused for a readiness that
+    // was merely not yet known. Awaiting here costs nothing on an adapter that asserts readiness
+    // and has no probe to wait for.
+    await this.adapter.whenProbed;
+
     const status = this.statusProvider();
     const resolvedRequest = { ...request };
 
@@ -222,5 +289,16 @@ export class WindowsLoopbackRuntime {
   /** Whether this runtime could actually capture right now, for callers building a status. */
   isReady(): boolean {
     return isLoopbackAdapterReady(this.adapter);
+  }
+
+  /**
+   * Resolves once `isReady()` is worth asking.
+   *
+   * Callers that publish readiness — the virtual-audio status the web tier picker reads — must
+   * await this first, or they will publish the fail-closed answer that was true only because the
+   * probe had not finished.
+   */
+  async whenProbed(): Promise<void> {
+    await this.adapter.whenProbed;
   }
 }

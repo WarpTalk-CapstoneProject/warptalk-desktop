@@ -288,7 +288,16 @@ test("native Windows loopback adapter starts process capture and publishes PCM c
   assert.equal(published[0].channelCount, 2);
 });
 
-test("Windows loopback runtime returns R2 when the native adapter cannot load", async () => {
+/**
+ * The refusal now comes from the GATE, not from the start attempt.
+ *
+ * It used to come from the attempt: the adapter claimed to be ready, `start` was allowed through,
+ * the import threw, and the catch turned that into `native-loopback-adapter-unavailable`. The
+ * capture was refused either way, so the behaviour looked correct — but `isReady()` was true the
+ * whole time, and that is what the virtual-audio status publishes and the web tier picker reads.
+ * The machine was offered a rung it could not run.
+ */
+test("a native adapter that cannot load its addon is not ready, and says so at the gate", async () => {
   const adapter = createNativeWindowsLoopbackAdapter({
     platform: "win32",
     publishPcmChunk: () => undefined,
@@ -304,6 +313,114 @@ test("Windows loopback runtime returns R2 when the native adapter cannot load", 
   assert.deepEqual(result, {
     started: false,
     riskId: "R2",
+    reason: "electron-loopback-api-not-ready",
+  });
+
+  await runtime.whenProbed();
+  assert.equal(adapter.electronLoopbackApiReady, false);
+  assert.equal(runtime.isReady(), false, "readiness must reflect the failed import, not the platform");
+});
+
+test("a native adapter whose addon loads reports itself ready", async () => {
+  const adapter = createNativeWindowsLoopbackAdapter({
+    platform: "win32",
+    publishPcmChunk: () => undefined,
+    resolveTargetProcessId: async () => 4242,
+    importLoopbackCapture: async () => ({ LoopbackCapture: class {} }),
+  });
+  const runtime = new WindowsLoopbackRuntime(adapter, () => readyStatus());
+
+  await runtime.whenProbed();
+
+  assert.equal(adapter.electronLoopbackApiReady, true);
+  assert.equal(runtime.isReady(), true);
+});
+
+/**
+ * A module that resolves but carries no constructor is the shape a half-broken build produces, and
+ * it is the one an `await import(...)` alone cannot tell from a working one.
+ */
+test("a module without LoopbackCapture is not a wired runtime", async () => {
+  const adapter = createNativeWindowsLoopbackAdapter({
+    platform: "win32",
+    publishPcmChunk: () => undefined,
+    resolveTargetProcessId: async () => 4242,
+    importLoopbackCapture: async () => ({}),
+  });
+
+  await adapter.whenProbed;
+
+  assert.equal(adapter.electronLoopbackApiReady, false);
+});
+
+/**
+ * The probe is asynchronous and `start` may be called before it settles. Awaiting it inside
+ * `start` is what stops a capture in the first moments after launch from being refused for a
+ * readiness that was merely not yet known — so this deliberately does NOT await the probe first.
+ */
+test("a capture started before the probe settles is not refused for it", async () => {
+  let released;
+  const adapter = createNativeWindowsLoopbackAdapter({
+    platform: "win32",
+    publishPcmChunk: () => undefined,
+    resolveTargetProcessId: async () => 4242,
+    importLoopbackCapture: () =>
+      new Promise((resolve) => {
+        released = () => resolve({ LoopbackCapture: class { start() {} stop() {} } });
+      }),
+  });
+  const runtime = new WindowsLoopbackRuntime(adapter, () => readyStatus());
+
+  assert.equal(adapter.electronLoopbackApiReady, false, "false until the probe answers");
+
+  const pending = runtime.start(READY_REQUEST);
+  released();
+
+  assert.deepEqual(await pending, { started: true });
+});
+
+/** The old failure mode still has to be reachable: an addon that loads and then throws on use. */
+test("Windows loopback runtime returns R2 when starting the loaded addon throws", async () => {
+  const adapter = createNativeWindowsLoopbackAdapter({
+    platform: "win32",
+    publishPcmChunk: () => undefined,
+    resolveTargetProcessId: async () => 4242,
+    importLoopbackCapture: async () => ({
+      LoopbackCapture: class {
+        start() {
+          throw new Error("the device is held by another process");
+        }
+
+        stop() {}
+      },
+    }),
+  });
+  const runtime = new WindowsLoopbackRuntime(adapter, () => readyStatus());
+
+  const result = await runtime.start(READY_REQUEST);
+
+  assert.deepEqual(result, {
+    started: false,
+    riskId: "R2",
     reason: "native-loopback-adapter-unavailable",
   });
+});
+
+/** Off Windows nothing is imported at all, and readiness is false without a probe having run. */
+test("a non-Windows native adapter never attempts the import", async () => {
+  let imports = 0;
+  const adapter = createNativeWindowsLoopbackAdapter({
+    platform: "darwin",
+    publishPcmChunk: () => undefined,
+    resolveTargetProcessId: async () => 4242,
+    importLoopbackCapture: async () => {
+      imports += 1;
+      return { LoopbackCapture: class {} };
+    },
+  });
+
+  await adapter.whenProbed;
+
+  assert.equal(imports, 0);
+  assert.equal(adapter.electronLoopbackApiReady, false);
 });
