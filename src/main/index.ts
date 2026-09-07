@@ -27,6 +27,7 @@ import {
   WindowsLoopbackRuntime,
 } from "./windows-loopback-runtime";
 import { MeetPresenceWatcher } from "./meet-presence";
+import { MeetUrlSensor } from "./meet-url-sensor";
 import type { MeetPresence } from "../shared/types";
 import {
   describeWindowsLoopbackSources,
@@ -60,18 +61,17 @@ const audioRuntime = new AudioRuntimeService();
  * something to do on the chance a meeting might start. The renderer knows when a bridge meeting is
  * near; main does not, and giving main that knowledge would mean giving it the API session too.
  *
- * On macOS the titles come back generic unless screen recording has been granted, so this reports
- * "no Meet visible" there. That degrades to the schedule-only trigger, which needs no window
- * knowledge at all - a worse answer, never a wrong one.
+ * The sensor reads the browser's own URL rather than the window title. A title is written by the
+ * page and so is worthless as a trust boundary; an address is not. See meet-url-sensor.ts.
+ *
+ * Off Windows the sensor has no implementation and every read fails, which the watcher treats as
+ * "could not look" and therefore reports nothing. That degrades to the schedule-only trigger,
+ * which needs no window knowledge at all - a worse answer, never a wrong one.
  */
+const meetUrlSensor = new MeetUrlSensor();
+
 const meetPresenceWatcher = new MeetPresenceWatcher({
-  listWindowTitles: async () => {
-    const sources = await desktopCapturer.getSources({
-      types: ["window"],
-      thumbnailSize: { width: 0, height: 0 },
-    });
-    return sources.map((source) => source.name);
-  },
+  readMeetSighting: () => meetUrlSensor.read(),
   onChange: (presence: MeetPresence) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("bridge:meet-presence", presence);
@@ -135,6 +135,9 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("bridge:unwatch-meet-presence", () => {
     meetPresenceWatcher.disarm();
+    // The helper is one long-lived shell. Disarming without killing it would leave a PowerShell
+    // process alive for the rest of the session, polling nothing.
+    meetUrlSensor.stop();
   });
   ipcMain.handle("audio:list-loopback-sources", async () => {
     if (process.platform !== "win32") return [];
@@ -922,8 +925,11 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on("before-quit", () => {
     webRuntime.stop();
-    // The audit found the loopback capture surviving both a renderer crash and quit. A child
-    // process this app started does not die with it on its own.
+    // Child processes this app started do not die with it on their own. The audit found the
+    // loopback capture surviving both a renderer crash and quit; the URL sensor is a second such
+    // child and is stopped here rather than repeating that.
+    meetPresenceWatcher.disarm();
+    meetUrlSensor.stop();
     void windowsLoopbackRuntime.stop();
   });
 

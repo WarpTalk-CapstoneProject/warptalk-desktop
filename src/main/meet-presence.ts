@@ -1,10 +1,10 @@
 /**
  * Noticing that a Google Meet call is on screen, without anything installed in the browser.
  *
- * The desktop app cannot see tabs. What it can see is window titles, which Electron already hands
- * over for the loopback picker — so "is the user in a Meet right now" is answerable today, for
- * every browser, with no extension and no new permission. That is the whole reason this file is
- * cheaper than it looks.
+ * This used to match window titles, and that was wrong in a way no amount of tightening fixes:
+ * Chrome names its window after `document.title`, so the string being matched is written by the
+ * page — any tab could claim to be a meeting. The sensor now reads the browser's own URL through
+ * UI Automation (see meet-url-sensor.ts); a page cannot write the address it is served from.
  *
  * WHAT THIS IS NOT
  *   It is a sensor, not a decision. It reports what it saw and nothing else: no lead time, no
@@ -22,11 +22,15 @@
  */
 
 import type { MeetPresence } from "../shared/types.ts";
-import { isMeetWindowTitle, extractMeetCode } from "./windows-loopback-sources.ts";
+import type { MeetSighting } from "./meet-url-sensor.ts";
 
 export interface MeetPresenceWatcherOptions {
-  /** Window titles, as the platform reports them. Injected so the tests need no Electron. */
-  listWindowTitles: () => Promise<string[]>;
+  /**
+   * One look at the machine. Resolves to null for "no Meet window" and REJECTS for "could not
+   * look" — the two must stay distinguishable, because only one of them should close a widget.
+   * Injected so the tests need neither Electron nor a browser.
+   */
+  readMeetSighting: () => Promise<MeetSighting | null>;
   /** Called only when the observation actually changed, never once per tick. */
   onChange: (presence: MeetPresence) => void;
   intervalMs?: number;
@@ -40,6 +44,14 @@ export class MeetPresenceWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private last: MeetPresence | null = null;
   private polling = false;
+  /**
+   * The browser process behind the last sighting.
+   *
+   * Deliberately not part of `MeetPresence`, so it never crosses IPC. The renderer has no use for
+   * a process id, and the audit of `listWindowsLoopbackSources` showed what happens when main
+   * hands the renderer more of the machine than it needs. Capture targeting reads it here.
+   */
+  private lastProcessId: number | null = null;
 
   private readonly options: MeetPresenceWatcherOptions;
 
@@ -49,6 +61,11 @@ export class MeetPresenceWatcher {
 
   get armed(): boolean {
     return this.timer !== null;
+  }
+
+  /** The browser process the last sighting belonged to, for aiming capture. Main-process only. */
+  get meetProcessId(): number | null {
+    return this.lastProcessId;
   }
 
   /** Idempotent: arming an armed watcher keeps the one interval it already has. */
@@ -66,6 +83,7 @@ export class MeetPresenceWatcher {
     // Forgotten on purpose, so the next arm reports what it sees rather than comparing against an
     // observation from a previous meeting and staying silent because nothing "changed".
     this.last = null;
+    this.lastProcessId = null;
     this.polling = false;
   }
 
@@ -75,13 +93,13 @@ export class MeetPresenceWatcher {
     if (this.polling) return;
     this.polling = true;
 
-    let titles: string[];
+    let sighting: MeetSighting | null;
     try {
-      titles = await this.options.listWindowTitles();
+      sighting = await this.options.readMeetSighting();
     } catch {
-      // Keep the last observation rather than reporting the meeting gone. An enumeration that
-      // failed says nothing about whether the user is still in the call, and reporting `false`
-      // here would close a widget over a transient error.
+      // Keep the last observation rather than reporting the meeting gone. A read that failed says
+      // nothing about whether the user is still in the call, and reporting `false` here would
+      // close a widget over a transient error.
       this.polling = false;
       return;
     }
@@ -91,13 +109,14 @@ export class MeetPresenceWatcher {
     // listening to any more.
     if (!this.timer) return;
 
-    const meetTitle = titles.find((title) => isMeetWindowTitle(title));
     const presence: MeetPresence = {
-      meetWindowVisible: Boolean(meetTitle),
+      meetWindowVisible: sighting !== null,
       observedAtMs: (this.options.now ?? Date.now)(),
     };
-    const code = meetTitle ? extractMeetCode(meetTitle) : null;
-    if (code) presence.meetCode = code;
+    // Absent from a picture-in-picture window, which exposes the host without the path. That is
+    // why the field is optional and why nothing downstream may require it to believe a sighting.
+    if (sighting?.meetCode) presence.meetCode = sighting.meetCode;
+    this.lastProcessId = sighting?.processId ?? null;
 
     if (
       this.last &&
