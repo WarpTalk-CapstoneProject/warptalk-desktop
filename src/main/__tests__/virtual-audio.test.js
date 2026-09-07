@@ -37,7 +37,11 @@ test("Windows exposes every free-cable loopback risk control in code", () => {
     ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "B1", "B2", "X1"],
   );
   assert.equal(status.riskControls?.find((risk) => risk.id === "R1")?.status, "mitigated");
-  for (const id of ["R2", "R3", "R4", "R5", "R6", "R7", "R8"]) {
+  // R6 left the guarded set when the silence padding it named was removed: the padding was itself
+  // the defect, pushing every frame after a gap a full gap into the future, and the destination
+  // node emits silence for unscheduled intervals without any help.
+  assert.equal(status.riskControls?.find((risk) => risk.id === "R6")?.status, "mitigated");
+  for (const id of ["R2", "R3", "R4", "R5", "R7", "R8"]) {
     assert.equal(status.riskControls?.find((risk) => risk.id === id)?.status, "guarded");
   }
   assert.equal(status.riskControls?.find((risk) => risk.id === "B1")?.status, "implemented");

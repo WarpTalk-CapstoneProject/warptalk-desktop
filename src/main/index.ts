@@ -11,6 +11,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  Notification,
   session,
   shell,
   systemPreferences,
@@ -149,7 +150,11 @@ function registerIpcHandlers(): void {
       return [];
     }
 
-    return describeWindowsLoopbackSources(sources);
+    // Our own windows are removed before the renderer ever sees them. The hard refusal lives in
+    // the start gate (R1 / target-is-warptalk) because ownerProcessId is resolved only for the
+    // first window of each process; this just keeps the obvious wrong answer out of the picker.
+    const described = await describeWindowsLoopbackSources(sources);
+    return described.filter((source) => source.ownerProcessId !== process.pid);
   });
   ipcMain.handle("translationRoom:join", async () => undefined);
   ipcMain.handle("translationRoom:leave", async () => undefined);
@@ -206,14 +211,21 @@ function getUrlOrigin(url: string): string | null {
   }
 }
 
+/**
+ * `about:blank` used to be allowed unconditionally, and the protocol was never checked.
+ *
+ * A blank popup inherits its opener's origin, so the renderer could write arbitrary markup into a
+ * window wearing this app's chrome — a credential prompt that looks like ours because, to the
+ * window manager, it is. And matching on `hostname` alone admitted `http://accounts.google.com`,
+ * which downgrades an auth flow to plaintext on whatever network the user is on.
+ *
+ * Host-confusion attempts (`https://accounts.google.com@evil.com`, `accounts.google.com.evil.com`)
+ * were already handled correctly by parsing rather than string-matching; that part is unchanged.
+ */
 function shouldAllowAuthPopup(url: string): boolean {
-  if (url === "about:blank") {
-    return true;
-  }
-
   try {
     const target = new URL(url);
-    return GOOGLE_AUTH_HOSTS.has(target.hostname);
+    return target.protocol === "https:" && GOOGLE_AUTH_HOSTS.has(target.hostname);
   } catch {
     return false;
   }
@@ -238,6 +250,19 @@ async function createWindow(): Promise<void> {
     icon: getDesktopAssetPath(APP_ICON_FILE),
     autoHideMenuBar: true,
     webPreferences: {
+      /**
+       * This window does realtime audio work while nobody is looking at it, which is not an edge
+       * case here — it is the designed use. During a bridge meeting the user is in Google Meet,
+       * WarpTalk is behind it, and this renderer is still decoding inbound PCM into a publishable
+       * track and playing the outbound dub into the virtual cable. Closing the window does not even
+       * end that: `close` hides to the tray rather than quitting.
+       *
+       * Chromium throttles timers in hidden pages, and while an audible page is exempt from the
+       * most aggressive tiers, the exemption is a heuristic about playback rather than a guarantee
+       * for a page assembling audio buffer by buffer. Paying full timer resolution for the length
+       * of a meeting is the right trade against a translation that arrives late in bursts.
+       */
+      backgroundThrottling: false,
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
       nodeIntegration: false,
@@ -329,6 +354,21 @@ async function createWindow(): Promise<void> {
       openExternalUrl(url);
     });
 
+    /**
+     * `will-navigate` does not fire for a server-side 3xx.
+     *
+     * So a same-origin navigation could pass the check above, the server could answer 302 to
+     * somewhere else, and the window would land there with this preload still attached — handing
+     * `window.warptalk` to another origin without any script of ours running. Redirects off the
+     * trusted origin are refused rather than followed; a legitimate one has never been needed.
+     */
+    win.webContents.on("will-redirect", (event, url) => {
+      const targetOrigin = getUrlOrigin(url);
+      if (targetOrigin === trustedOrigin) return;
+      event.preventDefault();
+      openExternalUrl(url);
+    });
+
     win.webContents.on("did-navigate-in-page", (_event, url) => {
       if (isDesktopLandingUrl(url, trustedOrigin)) {
         reloadDesktopEntry();
@@ -366,7 +406,45 @@ const BRIDGE_OFFER_ROUTE = "/desktop-bridge-offer";
  * first await, and the load is wrapped, because a window whose `closed` handler was registered
  * after an await leaves a destroyed object behind for the next caller to touch.
  */
+/**
+ * Says out loud that the bridge window has arrived.
+ *
+ * The window takes focus on purpose, but focus alone is a poor announcement: it can land while the
+ * user is looking at another monitor, and a window that silently steals the keyboard is worse than
+ * one that explains itself. The notification is the part that survives not looking.
+ *
+ * Clicking it brings the window forward, because a notification about a window that does not then
+ * give you the window is a dead end.
+ */
+function announceBridgeWindow(invited: boolean): void {
+  if (!Notification.isSupported()) return;
+
+  const notification = new Notification({
+    title: invited ? "Your translated meeting is ready" : `${APP_NAME} can translate this call`,
+    body: invited
+      ? "The transcript window is open beside your meeting."
+      : "You look like you are in a Google Meet. Open the panel to start translating it.",
+    icon: getDesktopAssetPath(APP_ICON_FILE),
+  });
+
+  notification.on("click", () => {
+    if (!transcriptWindow || transcriptWindow.isDestroyed()) return;
+    if (transcriptWindow.isMinimized()) transcriptWindow.restore();
+    transcriptWindow.show();
+    transcriptWindow.focus();
+  });
+
+  notification.show();
+}
+
+/**
+ * `roomId` is null for the offer — "you look like you are in a Meet, want to translate it?" — and
+ * set once a real room owns the window. That distinction decides how forcefully the window may
+ * behave, because only one of the two is backed by something the user arranged.
+ */
 async function openTranscriptWindow(roomId: string | null): Promise<void> {
+  const invited = roomId !== null;
+
   if (!resolvedWebOrigin) {
     console.error("Cannot open the transcript window before the web UI has loaded.");
     return;
@@ -380,6 +458,7 @@ async function openTranscriptWindow(roomId: string | null): Promise<void> {
     if (transcriptWindow.isMinimized()) transcriptWindow.restore();
     transcriptWindow.show();
     transcriptWindow.focus();
+    announceBridgeWindow(invited);
     // Reusing the window is not the same as leaving it where it was. The offer becomes a
     // transcript the moment the user accepts, and this used to return early on the strength of a
     // window merely existing - so the accepted offer stayed on screen, showing the question it had
@@ -400,7 +479,19 @@ async function openTranscriptWindow(roomId: string | null): Promise<void> {
     minWidth: 320,
     minHeight: 240,
     title: WINDOW_TITLE,
+    /**
+     * The window is meant to interrupt: it takes focus and announces itself, because a translated
+     * meeting the user does not notice starting is a meeting they will think is broken.
+     *
+     * Known cost, recorded rather than hidden. The `offer` state is reachable from a window title
+     * alone, and a window title is not ours — Chrome names its window after `document.title`, so
+     * any page in any tab can put "Google Meet" there. Interrupting on that signal means any web
+     * page can raise this window and fire a notification, repeatedly. Matching harder cannot fix a
+     * string written by the party the check guards against; only a signal the page does not
+     * control can.
+     */
     alwaysOnTop: true,
+    show: false,
     autoHideMenuBar: true,
     // Small and unobtrusive: it sits over a browser window for the whole meeting.
     skipTaskbar: false,
@@ -412,6 +503,20 @@ async function openTranscriptWindow(roomId: string | null): Promise<void> {
     },
   });
   transcriptWindow = win;
+
+  /**
+   * Revealed on first paint, not after `loadURL` resolves.
+   *
+   * `show: false` keeps the user from seeing an empty frame while the panel loads; `ready-to-show`
+   * fires once the renderer has something to draw, whichever load produced it — so the fallback
+   * path is covered too, and a load that never settles cannot leave the window invisible forever.
+   */
+  win.once("ready-to-show", () => {
+    if (win.isDestroyed()) return;
+    win.show();
+    win.focus();
+    announceBridgeWindow(invited);
+  });
 
   win.on("closed", () => {
     if (transcriptWindow === win) {
@@ -427,6 +532,12 @@ async function openTranscriptWindow(roomId: string | null): Promise<void> {
   // some other site, and popups from it go to the browser.
   const popupOrigin = resolvedWebOrigin;
   win.webContents.on("will-navigate", (event, url) => {
+    if (getUrlOrigin(url) === popupOrigin) return;
+    event.preventDefault();
+    openExternalUrl(url);
+  });
+  // Redirects are a separate event and were uncovered; this window carries the preload too.
+  win.webContents.on("will-redirect", (event, url) => {
     if (getUrlOrigin(url) === popupOrigin) return;
     event.preventDefault();
     openExternalUrl(url);
@@ -447,6 +558,7 @@ async function openTranscriptWindow(roomId: string | null): Promise<void> {
       console.error("Failed to load the fallback renderer:", fallbackError);
     }
   }
+
 }
 
 /**
@@ -691,8 +803,21 @@ function registerDisplayMediaHandler(): void {
         return;
       }
 
+      // A single-screen machine used to be granted the whole desktop with no prompt at all, which
+      // is every laptop. Chromium only requires a transient user activation for getDisplayMedia,
+      // and any click anywhere on the page supplies one — so the page could take the screen at a
+      // moment of its choosing and nothing would appear on screen to say so. One screen still gets
+      // a decision; it just has one option in it.
       if (sources.length === 1) {
-        callback({ video: sources[0] });
+        const { response: single } = await dialog.showMessageBox({
+          type: "question",
+          message: "Share your screen?",
+          detail: `${APP_NAME} is asking to capture ${sources[0].name}.`,
+          buttons: ["Share", "Cancel"],
+          cancelId: 1,
+          defaultId: 1,
+        });
+        callback(single === 0 ? { video: sources[0] } : {});
         return;
       }
 
@@ -711,6 +836,32 @@ function registerDisplayMediaHandler(): void {
 
       callback({ video: sources[response] });
     })();
+  });
+}
+
+/**
+ * Permission requests, which nothing was answering.
+ *
+ * With no handler installed Electron approves whatever the page asks for, so the remote origin
+ * could take the microphone and camera silently — no prompt, no indicator, no way for the user to
+ * learn it had happened. That matters more here than in most apps, because this one sits running
+ * beside the user's meetings all day.
+ *
+ * The allow-list is what the product actually uses: media for the meeting itself, notifications
+ * for the realtime provider. Everything else — geolocation, clipboard reads, MIDI, serial, HID,
+ * persistent storage prompts — is refused, because no part of WarpTalk asks for them and a page
+ * that does is not behaving like WarpTalk.
+ *
+ * Origin is checked as well as permission. It cannot save a compromised trusted origin, but it
+ * does mean a window that has somehow reached elsewhere gets nothing.
+ */
+const ALLOWED_PERMISSIONS = new Set(["media", "notifications"]);
+
+function registerPermissionHandler(): void {
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
+    const requestOrigin = getUrlOrigin(contents.getURL());
+    const trusted = resolvedWebOrigin !== null && requestOrigin === resolvedWebOrigin;
+    callback(trusted && ALLOWED_PERMISSIONS.has(permission));
   });
 }
 
@@ -758,6 +909,7 @@ if (!app.requestSingleInstanceLock()) {
     applyApplicationMenu();
     registerIpcHandlers();
     registerDisplayMediaHandler();
+    registerPermissionHandler();
     launchWindow();
     createTray();
 
@@ -770,6 +922,9 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on("before-quit", () => {
     webRuntime.stop();
+    // The audit found the loopback capture surviving both a renderer crash and quit. A child
+    // process this app started does not die with it on its own.
+    void windowsLoopbackRuntime.stop();
   });
 
   app.on("window-all-closed", () => {

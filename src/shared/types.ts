@@ -69,7 +69,7 @@ export interface VirtualAudioStatus {
 }
 
 export interface VirtualAudioRiskControl {
-  id: "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "B1" | "B2" | "X1";
+  id: "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "R9" | "B1" | "B2" | "X1";
   status: "mitigated" | "guarded" | "implemented" | "known-limitation" | "requires-runtime";
   control: string;
 }
@@ -94,7 +94,7 @@ export type WindowsLoopbackStartResult =
   | { started: true }
   | {
       started: false;
-      riskId: "R2" | "R3" | "R5" | "R6" | "R7" | "R8" | "B2" | "X1";
+      riskId: "R1" | "R2" | "R3" | "R5" | "R6" | "R7" | "R8" | "B2" | "X1";
       reason:
         | "unsupported-platform"
         | "driver-missing"
@@ -107,7 +107,8 @@ export type WindowsLoopbackStartResult =
         | "electron-loopback-api-not-ready"
         | "pcm-to-track-bridge-not-ready"
         | "silence-padding-not-ready"
-        | "target-process-resolver-not-ready";
+        | "target-process-resolver-not-ready"
+        | "target-is-warptalk";
     };
 
 export interface WindowsLoopbackSource {

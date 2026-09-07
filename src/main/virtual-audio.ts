@@ -128,8 +128,16 @@ const WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS: ReadonlyArray<VirtualAudioRiskC
   },
   {
     id: "R6",
-    status: "guarded",
-    control: "Start is blocked until silence padding is available for no-packet gaps in the loopback stream.",
+    status: "mitigated",
+    /**
+     * This used to read "Start is blocked until silence padding is available", and the padding it
+     * named was the defect. Synthesising a silent buffer the length of each gap pushed the next
+     * real frame a whole gap into the future, so the inbound leg's latency converged on the longest
+     * silence the meeting had contained and never came back. A MediaStreamAudioDestinationNode
+     * already emits silence for any unscheduled interval, so the published track was continuous
+     * without it; removing the padding lets the scheduler re-anchor to the current time instead.
+     */
+    control: "No-packet gaps need no padding: the destination node emits silence for them, and the scheduler re-anchors to the current time after each gap.",
   },
   {
     id: "R7",

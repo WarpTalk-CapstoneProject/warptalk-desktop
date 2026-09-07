@@ -125,6 +125,20 @@ test("Windows loopback start requires include target process tree", () => {
   });
 });
 
+/**
+ * The picker lists every window on the machine, ours included, and the renderer's default
+ * selection falls back to the first entry. Capturing our own tree feeds the dub back in as the far
+ * side's speech, which is transcribed, translated and dubbed again.
+ */
+test("Windows loopback start refuses to capture WarpTalk itself", () => {
+  const result = evaluateWindowsLoopbackStart(readyStatus(), readyAdapter(), {
+    ...READY_REQUEST,
+    targetProcessId: process.pid,
+  });
+
+  assert.deepEqual(result, { started: false, riskId: "R1", reason: "target-is-warptalk" });
+});
+
 test("Windows loopback start rejects missing Electron loopback adapter", () => {
   const result = evaluateWindowsLoopbackStart(
     readyStatus(),

@@ -217,6 +217,19 @@ export function evaluateWindowsLoopbackStart(
   if (request.includeTargetProcessTree !== true) {
     return missing("R7", "include-target-tree-required");
   }
+  /**
+   * Never capture ourselves.
+   *
+   * R1 holds because the dub leaves through CABLE Input and the browser reads that as a capture
+   * device, so it cannot come back through the browser's render stream. That reasoning is about
+   * the BROWSER's tree. Nothing stopped the target from being WarpTalk's own tree, and the picker
+   * lists every window on the machine including ours, with a `candidates[0]` fallback that can
+   * land on it. Capturing ourselves feeds the dub back in as the far side's speech, which is then
+   * transcribed, translated and dubbed again.
+   */
+  if (request.targetProcessId === process.pid) {
+    return missing("R1", "target-is-warptalk");
+  }
   if (!adapter.electronLoopbackApiReady) {
     return missing("R2", "electron-loopback-api-not-ready");
   }
