@@ -15,10 +15,18 @@
  *   to test.
  *
  * WHAT IT COSTS
- *   `desktopCapturer.getSources` enumerates every window on the machine. With `thumbnailSize` at
- *   zero it does not capture pixels, but it is still not free, so it runs only while armed. The
- *   renderer arms it when a bridge meeting is near and disarms when that stops being true; nothing
- *   polls in the background on the chance a meeting might happen.
+ *   A helper process holding a warm UI Automation client, and one read per poll across the
+ *   browser windows on the machine. Measured on the target machine: 9-55 ms per window read, and
+ *   sustained polling costs about 0.2 points of one core — the real cost is a one-time
+ *   accessibility wake-up in the browser rather than anything per read, and the delta vanished
+ *   across six paired idle/polling rounds.
+ *
+ *   It runs for the whole session on the desktop, for every user, including those who never open
+ *   a bridge meeting. That is deliberate and it is the price of the feature: the sensor used to
+ *   arm only where a bridge room already existed, which meant the very first bridge meeting a
+ *   workspace ever had could never be offered — the one case the offer exists for. If that price
+ *   should be optional, the gate belongs in a user preference, not in an accident of which rooms
+ *   happen to exist.
  */
 
 import type { MeetPresence } from "../shared/types.ts";
