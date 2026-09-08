@@ -7,8 +7,10 @@ export interface WarpTalkAPI {
   getVersion: () => Promise<string>;
   getPlatform: () => string;
   getRuntimeCapability: () => Promise<DesktopRuntimeCapability>;
-  startAudioCapture: () => Promise<void>;
+  listWindowsLoopbackSources: () => Promise<WindowsLoopbackSource[]>;
+  startAudioCapture: (request?: WindowsLoopbackCaptureRequest) => Promise<WindowsLoopbackStartResult>;
   stopAudioCapture: () => Promise<void>;
+  onWindowsLoopbackPcmChunk: (callback: (chunk: WindowsLoopbackPcmChunk) => void) => () => void;
   joinTranslationRoom: (translationRoomId: string) => Promise<void>;
   leaveTranslationRoom: () => Promise<void>;
   onTranscript: (callback: (data: TranscriptUpdate) => void) => void;
@@ -17,18 +19,22 @@ export interface WarpTalkAPI {
   openExternal: (url: string) => Promise<void>;
   getVirtualAudioStatus: () => Promise<VirtualAudioStatus>;
   installVirtualAudio: () => Promise<VirtualAudioInstallResult>;
-  openTranscriptWindow: (roomId: string) => Promise<void>;
+  openTranscriptWindow: (roomId: string | null) => Promise<void>;
+  activateRoom: (roomId: string) => Promise<void>;
+  onRoomActivated: (callback: (roomId: string) => void) => () => void;
   closeTranscriptWindow: () => Promise<void>;
+  watchMeetPresence: () => Promise<void>;
+  unwatchMeetPresence: () => Promise<void>;
+  onMeetPresence: (callback: (presence: MeetPresence) => void) => () => void;
   minimize: () => void;
   maximize: () => void;
   close: () => void;
 }
 
 /**
- * An EXTERNAL_BRIDGE meeting runs on two independent virtual audio devices: one WarpTalk writes
- * the dubbed voice into and Google Meet reads as its microphone, one Meet writes its output into
- * and WarpTalk reads. A single device cannot serve both — it would feed the user's own dubbed
- * voice back into the pipeline.
+ * An EXTERNAL_BRIDGE meeting runs on two directional legs. macOS carries them on two BlackHole
+ * devices; Windows primary carries outbound on the free VB-CABLE device and inbound through
+ * per-process loopback.
  */
 export interface VirtualAudioDevice {
   leg: "outbound" | "inbound";
@@ -36,6 +42,9 @@ export interface VirtualAudioDevice {
   /** What to look for in Google Meet's device picker. */
   deviceName: string;
   installed: boolean;
+  providerId?: string;
+  providerName?: string;
+  providerRole?: "primary" | "backup";
 }
 
 export interface VirtualAudioStatus {
@@ -44,13 +53,93 @@ export interface VirtualAudioStatus {
   supported: boolean;
   devices: VirtualAudioDevice[];
   ready: boolean;
+  bridgeMode?: "full" | "outbound-only" | "installed-not-running" | "caption-only";
+  recommendedProviderId?: string;
+  capabilities?: {
+    fullBridge: boolean;
+    outboundOnly: boolean;
+    captionOnly: boolean;
+    processLoopback: boolean;
+    processLoopbackRuntime?: "available" | "not-wired";
+    minWindowsProcessLoopbackBuild?: number;
+  };
+  riskControls?: VirtualAudioRiskControl[];
   /** Virtual drivers belonging to other applications, surfaced for support rather than used. */
   foreignDrivers: string[];
+}
+
+export interface VirtualAudioRiskControl {
+  id: "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7" | "R8" | "R9" | "B1" | "B2" | "X1";
+  status: "mitigated" | "guarded" | "implemented" | "known-limitation" | "requires-runtime";
+  control: string;
 }
 
 export interface VirtualAudioInstallResult {
   started: boolean;
   reason?: string;
+}
+
+export interface WindowsLoopbackCaptureRequest {
+  /** DesktopCapturer window source chosen by the user; resolved to the owner process in main. */
+  sourceId?: string;
+  /** The root browser process that owns the selected Google Meet window. */
+  targetProcessId?: number;
+  /** Must be true: false means EXCLUDE_TARGET_PROCESS_TREE and captures the wrong side. */
+  includeTargetProcessTree?: boolean;
+  /** Set only after the user picked the meeting window and accepted scoped audio capture. */
+  consentGranted?: boolean;
+}
+
+export type WindowsLoopbackStartResult =
+  | { started: true }
+  | {
+      started: false;
+      riskId: "R1" | "R2" | "R3" | "R5" | "R6" | "R7" | "R8" | "B2" | "X1";
+      reason:
+        | "unsupported-platform"
+        | "driver-missing"
+        | "process-loopback-unsupported"
+        | "consent-required"
+        | "target-process-required"
+        | "target-source-unresolved"
+        | "include-target-tree-required"
+        | "native-loopback-adapter-unavailable"
+        | "electron-loopback-api-not-ready"
+        | "pcm-to-track-bridge-not-ready"
+        | "silence-padding-not-ready"
+        | "target-process-resolver-not-ready"
+        | "target-is-warptalk";
+    };
+
+export interface WindowsLoopbackSource {
+  id: string;
+  name: string;
+  windowHandle?: number;
+  ownerProcessId?: number;
+  likelyMeetingWindow: boolean;
+}
+
+/**
+ * One observation of whether a Google Meet call is on screen.
+ *
+ * Raw on purpose. It says what a window title showed at a moment; it does not say which meeting
+ * that is, whether the user has joined rather than sitting in the green room, or whether the
+ * widget should be up. Those are decisions, they need tuning, and they live on the web side where
+ * they can be tested without a desktop build.
+ */
+export interface MeetPresence {
+  meetWindowVisible: boolean;
+  /** Present only when the title carried a room code, which a named meeting never does. */
+  meetCode?: string;
+  observedAtMs: number;
+}
+
+export interface WindowsLoopbackPcmChunk {
+  data: Uint8Array;
+  format: "s16le";
+  sampleRate: 48000;
+  channelCount: 2;
+  capturedAtMs: number;
 }
 
 export interface DesktopRuntimeCapability {
