@@ -41,6 +41,11 @@ import {
   hasHomebrew,
 } from "./virtual-audio";
 import { WebRuntimeService } from "./web-runtime";
+import {
+  PLUGIN_CONNECT_SCHEME,
+  firstPluginConnectLink,
+  pluginConnectTarget,
+} from "./plugin-connect-link";
 
 let mainWindow: BrowserWindow | null = null;
 let transcriptWindow: BrowserWindow | null = null;
@@ -379,6 +384,10 @@ async function createWindow(): Promise<void> {
     });
 
     await win.loadURL(desktopEntryUrl);
+
+    // A link that opened the app is only actionable now: the window exists and the trusted origin
+    // it has to be resolved against is known.
+    flushPendingPluginConnectLink();
   } catch (error) {
     // Offline, DNS failure, the deployed app being down, or the local web
     // runtime failing to come up. Without this the window stays blank forever.
@@ -889,6 +898,51 @@ function applyApplicationMenu(): void {
   );
 }
 
+/**
+ * A deep link that arrived before there was a window, or before the web origin was known.
+ *
+ * A cold start opens the app *because* of the link, so the link is in hand a second or two before
+ * anything can act on it. Holding it is what makes the launched-by-link case behave like the
+ * already-running one.
+ */
+let pendingPluginConnectLink: string | null = null;
+
+function handlePluginConnectDeepLink(link: string): void {
+  pendingPluginConnectLink = link;
+  revealMainWindow();
+  flushPendingPluginConnectLink();
+}
+
+function flushPendingPluginConnectLink(): void {
+  if (!pendingPluginConnectLink) return;
+
+  const target = pluginConnectTarget(pendingPluginConnectLink, resolvedWebOrigin);
+  if (!target || !mainWindow || mainWindow.isDestroyed()) return;
+
+  pendingPluginConnectLink = null;
+  void mainWindow.loadURL(target).catch((error) => {
+    console.error("Failed to open the plugins page after a connect:", error);
+  });
+}
+
+/**
+ * Claims the scheme with the OS.
+ *
+ * In development the executable is Electron itself, so the entry script has to be recorded
+ * alongside it - registering `electron.exe` on its own points the scheme at a runtime with no app
+ * to open.
+ */
+function registerPluginConnectScheme(): void {
+  if (process.defaultApp && process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient(PLUGIN_CONNECT_SCHEME, process.execPath, [
+      path.resolve(process.argv[1]),
+    ]);
+    return;
+  }
+
+  app.setAsDefaultProtocolClient(PLUGIN_CONNECT_SCHEME);
+}
+
 function revealMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) {
     launchWindow();
@@ -906,13 +960,35 @@ function revealMainWindow(): void {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", revealMainWindow);
+  // Windows and Linux deliver the link as an argument to the second launch, which the running
+  // instance receives here rather than as an event of its own.
+  app.on("second-instance", (_event, argv) => {
+    const link = firstPluginConnectLink(argv);
+    if (link) {
+      handlePluginConnectDeepLink(link);
+      return;
+    }
+    revealMainWindow();
+  });
+
+  // macOS never starts a second process for a scheme; it wakes this one with an event, which can
+  // arrive before `whenReady`.
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    handlePluginConnectDeepLink(url);
+  });
 
   app.whenReady().then(() => {
+    registerPluginConnectScheme();
     applyApplicationMenu();
     registerIpcHandlers();
     registerDisplayMediaHandler();
     registerPermissionHandler();
+    // Cold start: the scheme link is in argv on Windows and Linux, and `launchWindow` picks it up
+    // once the window has loaded and the origin is known.
+    const launchLink = firstPluginConnectLink(process.argv);
+    if (launchLink) pendingPluginConnectLink = launchLink;
+
     launchWindow();
     createTray();
 

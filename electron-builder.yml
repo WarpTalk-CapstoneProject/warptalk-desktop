@@ -13,6 +13,16 @@ afterPack: scripts/adhoc-sign-mac.js
 # no-ops without notary credentials. See scripts/notarize-mac.js.
 afterSign: scripts/notarize-mac.js
 
+# The URL scheme a plugin consent comes back through. Connecting a plugin opens the provider's
+# consent screen in the system browser, so when it finishes the browser is holding the result and
+# this app cannot see it; app.warptalk.io.vn/connect/<provider>/callback hands it back over this
+# scheme. Registering it is a packaging concern - an unregistered scheme fails silently, with the
+# browser simply doing nothing when the link is opened.
+protocols:
+  - name: WarpTalk
+    schemes:
+      - warptalk
+
 directories:
   output: release
   buildResources: resources
