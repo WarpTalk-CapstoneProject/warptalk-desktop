@@ -13,6 +13,14 @@ afterPack: scripts/adhoc-sign-mac.js
 # no-ops without notary credentials. See scripts/notarize-mac.js.
 afterSign: scripts/notarize-mac.js
 
+# Same scheme as the local-web config: a plugin consent comes back through the system browser,
+# and this is what lets it reach the app. Declared in both configs because a build that ships
+# without it fails silently - the browser opens the link and nothing happens.
+protocols:
+  - name: WarpTalk
+    schemes:
+      - warptalk
+
 directories:
   output: release
   buildResources: resources
