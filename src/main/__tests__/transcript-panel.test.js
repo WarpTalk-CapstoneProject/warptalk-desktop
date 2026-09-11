@@ -103,19 +103,16 @@ test("the tray offers the meeting panel, and only when there is one to show", ()
   assert.equal(none.enabled, false, "disabled, not hidden, so it stays where the user learned it");
 });
 
-test("the tray keeps its existing entries", () => {
-  const labels = trayMenuTemplate("WarpTalk", { meetingPanelAvailable: false }, {
+test("the tray offers only entries that do something", () => {
+  const template = trayMenuTemplate("WarpTalk", { meetingPanelAvailable: true }, {
     showApp: () => {},
     showMeetingPanel: () => {},
     quit: () => {},
-  })
-    .filter((item) => item.label)
-    .map((item) => item.label);
-  assert.deepEqual(labels, [
-    "Show WarpTalk",
-    "Show meeting panel",
-    "Start Translation",
-    "Stop Translation",
-    "Quit",
-  ]);
+  });
+  const labels = template.filter((item) => item.label).map((item) => item.label);
+  // Start/Stop Translation used to sit between these, with TODO handlers: a click did nothing.
+  assert.deepEqual(labels, ["Show WarpTalk", "Show meeting panel", "Quit"]);
+  // And no separator is left doubled up where they were.
+  const kinds = template.map((item) => (item.type === "separator" ? "-" : "item"));
+  assert.ok(!kinds.join(",").includes("-,-"), `adjacent separators: ${kinds.join(",")}`);
 });
