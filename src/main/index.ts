@@ -31,7 +31,7 @@ import { MeetPresenceWatcher } from "./meet-presence";
 import { MeetUrlSensor } from "./meet-url-sensor";
 import { TranscriptPanelLedger } from "./transcript-panel";
 import { trayMenuTemplate } from "./tray-menu";
-import { shouldHideOnClose } from "./quit-lifecycle";
+import { shouldHideOnClose, shouldIgnoreBeforeUnload } from "./quit-lifecycle";
 import { checkForUpdatesInteractive, initAutoUpdater } from "./updater";
 import type { MeetPresence } from "../shared/types";
 import {
@@ -1070,6 +1070,14 @@ if (!app.requestSingleInstanceLock()) {
   // its Windows path as well, just before `app.quit()`.
   autoUpdater.on("before-quit-for-update", () => {
     isQuitting = true;
+  });
+
+  // Every window, the bridge popup included: a page's `beforeunload` silently cancels the quit in
+  // Electron. See quit-lifecycle.ts shouldIgnoreBeforeUnload.
+  app.on("web-contents-created", (_event, contents) => {
+    contents.on("will-prevent-unload", (event) => {
+      if (shouldIgnoreBeforeUnload({ isQuitting })) event.preventDefault();
+    });
   });
 
   app.on("window-all-closed", () => {

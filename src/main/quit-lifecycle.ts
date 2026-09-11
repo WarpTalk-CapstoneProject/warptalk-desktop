@@ -29,3 +29,20 @@ export interface CloseContext {
 export function shouldHideOnClose({ hasTray, isQuitting }: CloseContext): boolean {
   return hasTray && !isQuitting;
 }
+
+/**
+ * Whether a page's `beforeunload` may stop the app from quitting.
+ *
+ * The web app's settings pages register `beforeunload` while an auto-save is pending or has failed
+ * (warptalk-web src/hooks/use-auto-save.ts). A browser turns that into a "Leave site?" prompt;
+ * Electron shows nothing and silently cancels the close - and with it the quit. So Quit did
+ * nothing, and the updater's "Restart now" would do nothing either, with the installer already
+ * spawned and about to kill the app from outside anyway.
+ *
+ * Once the app is quitting the page is overruled: an unsaved settings change is lost, which is the
+ * lesser harm next to a Quit that does not quit. Outside a quit the page keeps its veto, so a
+ * navigation inside the app still cannot discard the change.
+ */
+export function shouldIgnoreBeforeUnload({ isQuitting }: { isQuitting: boolean }): boolean {
+  return isQuitting;
+}
