@@ -4,6 +4,7 @@
 
 import {
   app,
+  autoUpdater,
   BrowserWindow,
   clipboard,
   desktopCapturer,
@@ -30,6 +31,7 @@ import { MeetPresenceWatcher } from "./meet-presence";
 import { MeetUrlSensor } from "./meet-url-sensor";
 import { TranscriptPanelLedger } from "./transcript-panel";
 import { trayMenuTemplate } from "./tray-menu";
+import { shouldHideOnClose } from "./quit-lifecycle";
 import type { MeetPresence } from "../shared/types";
 import {
   describeWindowsLoopbackSources,
@@ -53,6 +55,8 @@ let mainWindow: BrowserWindow | null = null;
 /** The bridge popup, and what the web app asked it to show. See transcript-panel.ts. */
 const transcriptPanel = new TranscriptPanelLedger<BrowserWindow>();
 let tray: Tray | null = null;
+/** Set once the app has decided to quit, before any window is asked to close. See quit-lifecycle.ts. */
+let isQuitting = false;
 /**
  * Where the web UI is being served from, captured once the main window has resolved it. The
  * transcript popup needs the same origin and must not resolve it a second time: in local-packaged
@@ -302,13 +306,18 @@ async function createWindow(): Promise<void> {
     }
   });
 
-  // Minimize to tray instead of closing
+  // Minimize to tray instead of closing - except while quitting, when cancelling the close would
+  // cancel the quit. See quit-lifecycle.ts.
   win.on("close", (event) => {
-    if (tray) {
+    if (shouldHideOnClose({ hasTray: tray !== null, isQuitting })) {
       event.preventDefault();
       win.hide();
     }
   });
+
+  // Windows shutdown and log-off never emit `before-quit`, so the children stopped there (web
+  // runtime, loopback capture, URL sensor) would be left to the OS. Routed through the same quit.
+  win.on("session-end", () => app.quit());
 
   win.setMenuBarVisibility(false);
   win.setAutoHideMenuBar(true);
@@ -800,11 +809,7 @@ function refreshTrayMenu(): void {
         {
           showApp: () => mainWindow?.show(),
           showMeetingPanel: () => void reopenTranscriptWindow(),
-          quit: () => {
-            tray?.destroy();
-            tray = null;
-            app.quit();
-          },
+          quit: () => app.quit(),
         },
       ),
     ),
@@ -1046,6 +1051,8 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("before-quit", () => {
+    // First, and before anything that could throw: this is what lets the windows close.
+    isQuitting = true;
     webRuntime.stop();
     // Child processes this app started do not die with it on their own. The audit found the
     // loopback capture surviving both a renderer crash and quit; the URL sensor is a second such
@@ -1053,6 +1060,13 @@ if (!app.requestSingleInstanceLock()) {
     meetPresenceWatcher.disarm();
     meetUrlSensor.stop();
     void windowsLoopbackRuntime.stop();
+  });
+
+  // Squirrel.Mac's quitAndInstall - which electron-updater's MacUpdater calls - closes every window
+  // before it emits `before-quit`, so the flag would come too late. electron-updater emits this on
+  // its Windows path as well, just before `app.quit()`.
+  autoUpdater.on("before-quit-for-update", () => {
+    isQuitting = true;
   });
 
   app.on("window-all-closed", () => {
