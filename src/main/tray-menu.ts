@@ -41,19 +41,10 @@ export function trayMenuTemplate(
       enabled: state.meetingPanelAvailable,
       click: () => actions.showMeetingPanel(),
     },
-    { type: "separator" },
-    {
-      label: "Start Translation",
-      click: () => {
-        // TODO: Start audio capture & translation pipeline
-      },
-    },
-    {
-      label: "Stop Translation",
-      click: () => {
-        // TODO: Stop audio capture
-      },
-    },
+    // No Start/Stop Translation here. There were two such items, and neither did anything: their
+    // handlers were TODOs from the first scaffold. Translation starts and stops in the meeting - the
+    // popup over Meet, or the main window - where the session that carries it lives, and a tray
+    // entry that looks like a control and silently isn't one is worse than no entry.
     { type: "separator" },
     {
       label: "Quit",
