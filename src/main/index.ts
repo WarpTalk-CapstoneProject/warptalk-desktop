@@ -32,6 +32,7 @@ import { MeetUrlSensor } from "./meet-url-sensor";
 import { TranscriptPanelLedger } from "./transcript-panel";
 import { trayMenuTemplate } from "./tray-menu";
 import { shouldHideOnClose } from "./quit-lifecycle";
+import { checkForUpdatesInteractive, initAutoUpdater } from "./updater";
 import type { MeetPresence } from "../shared/types";
 import {
   describeWindowsLoopbackSources,
@@ -809,6 +810,7 @@ function refreshTrayMenu(): void {
         {
           showApp: () => mainWindow?.show(),
           showMeetingPanel: () => void reopenTranscriptWindow(),
+          checkForUpdates: () => void checkForUpdatesInteractive(),
           quit: () => app.quit(),
         },
       ),
@@ -1042,6 +1044,7 @@ if (!app.requestSingleInstanceLock()) {
 
     launchWindow();
     createTray();
+    initAutoUpdater();
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {

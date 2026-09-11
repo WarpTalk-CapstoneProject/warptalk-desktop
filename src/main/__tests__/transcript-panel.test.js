@@ -88,6 +88,7 @@ test("the tray offers the meeting panel, and only when there is one to show", ()
   const actions = {
     showApp: () => calls.push("app"),
     showMeetingPanel: () => calls.push("panel"),
+    checkForUpdates: () => calls.push("updates"),
     quit: () => calls.push("quit"),
   };
 
@@ -107,11 +108,12 @@ test("the tray offers only entries that do something", () => {
   const template = trayMenuTemplate("WarpTalk", { meetingPanelAvailable: true }, {
     showApp: () => {},
     showMeetingPanel: () => {},
+    checkForUpdates: () => {},
     quit: () => {},
   });
   const labels = template.filter((item) => item.label).map((item) => item.label);
   // Start/Stop Translation used to sit between these, with TODO handlers: a click did nothing.
-  assert.deepEqual(labels, ["Show WarpTalk", "Show meeting panel", "Quit"]);
+  assert.deepEqual(labels, ["Show WarpTalk", "Show meeting panel", "Check for Updates…", "Quit"]);
   // And no separator is left doubled up where they were.
   const kinds = template.map((item) => (item.type === "separator" ? "-" : "item"));
   assert.ok(!kinds.join(",").includes("-,-"), `adjacent separators: ${kinds.join(",")}`);

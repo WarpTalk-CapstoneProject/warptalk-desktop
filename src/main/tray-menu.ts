@@ -11,6 +11,8 @@ export interface TrayMenuActions {
   showApp: () => void;
   /** Brings the bridge popup back. See TranscriptPanelLedger.reopenTarget. */
   showMeetingPanel: () => void;
+  /** Asks electron-updater now, and always answers. See updater.ts checkForUpdatesInteractive. */
+  checkForUpdates: () => void;
   quit: () => void;
 }
 
@@ -46,6 +48,10 @@ export function trayMenuTemplate(
     // popup over Meet, or the main window - where the session that carries it lives, and a tray
     // entry that looks like a control and silently isn't one is worse than no entry.
     { type: "separator" },
+    {
+      label: "Check for Updates…",
+      click: () => actions.checkForUpdates(),
+    },
     {
       label: "Quit",
       click: () => actions.quit(),
