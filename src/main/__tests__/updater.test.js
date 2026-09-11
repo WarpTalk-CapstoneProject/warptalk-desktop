@@ -41,6 +41,11 @@ test("every build that cannot update itself says why", () => {
   }
 });
 
+test("the macOS gate logs the line WT-618's acceptance table looks for", () => {
+  // updater.ts logs "Auto-update skipped: <reason>"; the ticket expects "skipped: unsigned build".
+  assert.match(updaterGate({ ...installed, platform: "darwin" }).reason, /^unsigned build/);
+});
+
 test("a dev run is gated before anything platform-specific", () => {
   // Otherwise `electron-vite dev` on a Mac would log the signing story instead of the real reason.
   const gate = updaterGate({ isPackaged: false, platform: "darwin", env: { PORTABLE_EXECUTABLE_DIR: "x" } });

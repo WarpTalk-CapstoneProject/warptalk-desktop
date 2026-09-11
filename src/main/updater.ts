@@ -72,7 +72,7 @@ export function initAutoUpdater(): void {
   const decided = currentGate();
   log().info(`${app.getName()} ${app.getVersion()} on ${process.platform}/${process.arch}`);
   if (!decided.enabled) {
-    log().info(`Auto-update off: ${decided.reason}`);
+    log().info(`Auto-update skipped: ${decided.reason}`);
     return;
   }
   active = true;
@@ -174,7 +174,7 @@ export function checkForUpdatesInteractive(): Promise<void> {
 async function runInteractiveCheck(): Promise<void> {
   const decided = currentGate();
   if (!decided.enabled) {
-    log().info(`Check for Updates: off (${decided.reason})`);
+    log().info(`Check for Updates skipped: ${decided.reason}`);
     return showOutcome({ kind: "gated", gate: decided });
   }
   if (!active) return; // initAutoUpdater has not run; nothing is wired to answer with.

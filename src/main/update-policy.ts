@@ -74,7 +74,7 @@ export function updaterGate({ isPackaged, platform, env }: UpdaterEnvironment): 
     return {
       enabled: false,
       code: "macos-unsigned",
-      reason: "macOS build is ad-hoc signed; Squirrel.Mac rejects updates without a Developer ID (WT-618 T7)",
+      reason: "unsigned build (macOS, ad-hoc signed); Squirrel.Mac rejects updates without a Developer ID (WT-618 T7)",
       userMessage:
         "Automatic updates are not available on macOS yet. Download the latest version to update.",
     };
