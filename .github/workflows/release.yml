@@ -61,6 +61,11 @@ jobs:
       - name: Check macOS signing contract
         run: npm run check:mac-signing
 
+      # A release without app-update.yml, or built with electron-updater inlined or left unpacked,
+      # strands every install of it: the update that would fix it is what it can no longer receive.
+      - name: Check release / auto-update contract
+        run: npm run check:release
+
       # Code signing is opt-in, and the certificates are not bought yet.
       #
       # These used to be listed directly in the build step's `env:`, on the assumption that an
