@@ -23,6 +23,10 @@ export interface WarpTalkAPI {
   activateRoom: (roomId: string) => Promise<void>;
   onRoomActivated: (callback: (roomId: string) => void) => () => void;
   closeTranscriptWindow: () => Promise<void>;
+  /** The user closed the popup; `roomId` is what it showed, null for the offer. */
+  onTranscriptWindowClosed: (callback: (roomId: string | null) => void) => () => void;
+  /** The app reopened the popup itself, from the tray or a notification. */
+  onTranscriptWindowReopened: (callback: (roomId: string | null) => void) => () => void;
   watchMeetPresence: () => Promise<void>;
   unwatchMeetPresence: () => Promise<void>;
   onMeetPresence: (callback: (presence: MeetPresence) => void) => () => void;
