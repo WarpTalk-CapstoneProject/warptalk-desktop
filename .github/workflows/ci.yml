@@ -57,5 +57,20 @@ jobs:
       - name: Check macOS signing contract
         run: npm run check:mac-signing
 
+      # The self-updater (WT-618) depends on a publish block in both builder configs and on the main
+      # bundle leaving electron-updater external. Break either and the release that carries the
+      # break can never update itself again - so it is caught here, not in users' hands.
+      - name: Check release / auto-update contract
+        run: npm run check:release
+
+      # The contract above reads the config; these two check what it actually produces. Works with
+      # the install above: `electron-vite build` reads electron/package.json for its target and never
+      # runs the Electron binary that ELECTRON_SKIP_BINARY_DOWNLOAD leaves out.
+      - name: Build main, preload and renderer bundles
+        run: npx electron-vite build
+
+      - name: Check the main bundle requires electron-updater
+        run: npm run check:release -- --built
+
       # `npm run lint` is deliberately absent: the repo has no ESLint config, so the script fails
       # before linting anything. Add the step together with a config, not before.

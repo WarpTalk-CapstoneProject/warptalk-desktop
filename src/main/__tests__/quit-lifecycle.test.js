@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { shouldHideOnClose } from "../quit-lifecycle.ts";
+import { shouldHideOnClose, shouldIgnoreBeforeUnload } from "../quit-lifecycle.ts";
 import { trayMenuTemplate } from "../tray-menu.ts";
 
 test("closing the window in normal use hides it to the tray", () => {
@@ -31,4 +31,15 @@ test("the tray's Quit item asks the app to quit and does nothing else", () => {
 
   template.find((item) => item.label === "Quit").click();
   assert.deepEqual(calls, ["quit"]);
+});
+
+test("a page's beforeunload cannot cancel a quit", () => {
+  // The web app's settings pages hold `beforeunload` while an auto-save is pending. Electron shows
+  // no prompt for it and simply cancels the close, so Quit - and the updater's Restart now - did
+  // nothing at all.
+  assert.equal(shouldIgnoreBeforeUnload({ isQuitting: true }), true);
+});
+
+test("outside a quit the page keeps its veto", () => {
+  assert.equal(shouldIgnoreBeforeUnload({ isQuitting: false }), false);
 });
