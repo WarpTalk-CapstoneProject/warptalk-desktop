@@ -65,6 +65,18 @@ contextBridge.exposeInMainWorld("warptalk", {
   },
   closeTranscriptWindow: (): Promise<void> =>
     ipcRenderer.invoke("bridge:close-transcript-window"),
+  // The user closed the popup. Never sent for a close the web app asked for.
+  onTranscriptWindowClosed: (callback: (roomId: string | null) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, roomId: string | null) => callback(roomId);
+    ipcRenderer.on("bridge:transcript-window-closed", listener);
+    return () => ipcRenderer.off("bridge:transcript-window-closed", listener);
+  },
+  // The app brought the popup back itself - the tray item, or a notification click.
+  onTranscriptWindowReopened: (callback: (roomId: string | null) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, roomId: string | null) => callback(roomId);
+    ipcRenderer.on("bridge:transcript-window-reopened", listener);
+    return () => ipcRenderer.off("bridge:transcript-window-reopened", listener);
+  },
   watchMeetPresence: (): Promise<void> =>
     ipcRenderer.invoke("bridge:watch-meet-presence"),
   unwatchMeetPresence: (): Promise<void> =>

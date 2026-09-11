@@ -4,6 +4,7 @@
 
 import {
   app,
+  autoUpdater,
   BrowserWindow,
   clipboard,
   desktopCapturer,
@@ -28,6 +29,10 @@ import {
 } from "./windows-loopback-runtime";
 import { MeetPresenceWatcher } from "./meet-presence";
 import { MeetUrlSensor } from "./meet-url-sensor";
+import { TranscriptPanelLedger } from "./transcript-panel";
+import { trayMenuTemplate } from "./tray-menu";
+import { shouldHideOnClose, shouldIgnoreBeforeUnload } from "./quit-lifecycle";
+import { checkForUpdatesInteractive, initAutoUpdater } from "./updater";
 import type { MeetPresence } from "../shared/types";
 import {
   describeWindowsLoopbackSources,
@@ -48,8 +53,11 @@ import {
 } from "./plugin-connect-link";
 
 let mainWindow: BrowserWindow | null = null;
-let transcriptWindow: BrowserWindow | null = null;
+/** The bridge popup, and what the web app asked it to show. See transcript-panel.ts. */
+const transcriptPanel = new TranscriptPanelLedger<BrowserWindow>();
 let tray: Tray | null = null;
+/** Set once the app has decided to quit, before any window is asked to close. See quit-lifecycle.ts. */
+let isQuitting = false;
 /**
  * Where the web UI is being served from, captured once the main window has resolved it. The
  * transcript popup needs the same origin and must not resolve it a second time: in local-packaged
@@ -181,6 +189,8 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("bridge:install-virtual-audio", () => runVirtualAudioInstaller());
   ipcMain.handle("bridge:open-transcript-window", async (_event, roomId: string | null) => {
+    transcriptPanel.request(roomId ?? null);
+    refreshTrayMenu();
     await openTranscriptWindow(roomId ?? null);
   });
   /**
@@ -196,7 +206,11 @@ function registerIpcHandlers(): void {
     }
   });
   ipcMain.handle("bridge:close-transcript-window", () => {
-    transcriptWindow?.close();
+    // Withdrawn before it is closed, so the `closed` handler knows this one was asked for and
+    // does not report it back as the user's. See transcript-panel.ts.
+    const win = transcriptPanel.withdraw();
+    refreshTrayMenu();
+    if (win && !win.isDestroyed()) win.close();
   });
 
   ipcMain.on("window:minimize", () => mainWindow?.minimize());
@@ -293,13 +307,18 @@ async function createWindow(): Promise<void> {
     }
   });
 
-  // Minimize to tray instead of closing
+  // Minimize to tray instead of closing - except while quitting, when cancelling the close would
+  // cancel the quit. See quit-lifecycle.ts.
   win.on("close", (event) => {
-    if (tray) {
+    if (shouldHideOnClose({ hasTray: tray !== null, isQuitting })) {
       event.preventDefault();
       win.hide();
     }
   });
+
+  // Windows shutdown and log-off never emit `before-quit`, so the children stopped there (web
+  // runtime, loopback capture, URL sensor) would be left to the OS. Routed through the same quit.
+  win.on("session-end", () => app.quit());
 
   win.setMenuBarVisibility(false);
   win.setAutoHideMenuBar(true);
@@ -426,7 +445,9 @@ const BRIDGE_OFFER_ROUTE = "/desktop-bridge-offer";
  * one that explains itself. The notification is the part that survives not looking.
  *
  * Clicking it brings the window forward, because a notification about a window that does not then
- * give you the window is a dead end.
+ * give you the window is a dead end. That includes a window the user has since closed: it used to
+ * do nothing then, which is the dead end again. It brings back what the web app wants shown NOW
+ * rather than what this notification announced, which may be twenty minutes and one meeting old.
  */
 function announceBridgeWindow(invited: boolean): void {
   if (!Notification.isSupported()) return;
@@ -440,13 +461,38 @@ function announceBridgeWindow(invited: boolean): void {
   });
 
   notification.on("click", () => {
-    if (!transcriptWindow || transcriptWindow.isDestroyed()) return;
-    if (transcriptWindow.isMinimized()) transcriptWindow.restore();
-    transcriptWindow.show();
-    transcriptWindow.focus();
+    const win = transcriptPanel.window;
+    if (win && !win.isDestroyed()) {
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+      return;
+    }
+    if (transcriptPanel.reopenTarget) {
+      void reopenTranscriptWindow();
+      return;
+    }
+    // Nothing is wanted any more - the meeting it announced is over. The app is the next best
+    // answer to a click; nothing at all is the one answer that reads as broken.
+    revealMainWindow();
   });
 
   notification.show();
+}
+
+/**
+ * Brings back the popup the user closed, on their say-so: the tray item, or a notification.
+ *
+ * Not announced - the user is the one who asked - and reported to the web app, whose trigger has
+ * to adopt the window again or it would never close it when the meeting ends.
+ */
+async function reopenTranscriptWindow(): Promise<void> {
+  const target = transcriptPanel.reopenTarget;
+  if (!target) return;
+  await openTranscriptWindow(target.roomId, { announce: false });
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("bridge:transcript-window-reopened", target.roomId);
+  }
 }
 
 /**
@@ -454,7 +500,10 @@ function announceBridgeWindow(invited: boolean): void {
  * set once a real room owns the window. That distinction decides how forcefully the window may
  * behave, because only one of the two is backed by something the user arranged.
  */
-async function openTranscriptWindow(roomId: string | null): Promise<void> {
+async function openTranscriptWindow(
+  roomId: string | null,
+  { announce = true }: { announce?: boolean } = {},
+): Promise<void> {
   const invited = roomId !== null;
 
   if (!resolvedWebOrigin) {
@@ -466,18 +515,20 @@ async function openTranscriptWindow(roomId: string | null): Promise<void> {
     ? `${resolvedWebOrigin}${TRANSCRIPT_ROUTE}/${encodeURIComponent(roomId)}`
     : `${resolvedWebOrigin}${BRIDGE_OFFER_ROUTE}`;
 
-  if (transcriptWindow && !transcriptWindow.isDestroyed()) {
-    if (transcriptWindow.isMinimized()) transcriptWindow.restore();
-    transcriptWindow.show();
-    transcriptWindow.focus();
-    announceBridgeWindow(invited);
+  const existing = transcriptPanel.window;
+  if (existing && !existing.isDestroyed()) {
+    if (existing.isMinimized()) existing.restore();
+    existing.show();
+    existing.focus();
+    if (announce) announceBridgeWindow(invited);
+    transcriptPanel.shown(existing, roomId);
     // Reusing the window is not the same as leaving it where it was. The offer becomes a
     // transcript the moment the user accepts, and this used to return early on the strength of a
     // window merely existing - so the accepted offer stayed on screen, showing the question it had
     // already been answered.
-    if (transcriptWindow.webContents.getURL() !== target) {
+    if (existing.webContents.getURL() !== target) {
       try {
-        await transcriptWindow.loadURL(target);
+        await existing.loadURL(target);
       } catch (error) {
         console.error("Failed to move the bridge window:", error);
       }
@@ -514,7 +565,7 @@ async function openTranscriptWindow(roomId: string | null): Promise<void> {
       sandbox: true,
     },
   });
-  transcriptWindow = win;
+  transcriptPanel.shown(win, roomId);
 
   /**
    * Revealed on first paint, not after `loadURL` resolves.
@@ -527,12 +578,21 @@ async function openTranscriptWindow(roomId: string | null): Promise<void> {
     if (win.isDestroyed()) return;
     win.show();
     win.focus();
-    announceBridgeWindow(invited);
+    if (announce) announceBridgeWindow(invited);
   });
 
+  /**
+   * The user closed it - the web app's own closes are withdrawn first and never reach this.
+   *
+   * The web app is told, because it is the one keeping a record of what is open. Silence here is
+   * what lost the popup: the trigger went on believing it was up and skipped every later open for
+   * the same meeting as a no-op.
+   */
   win.on("closed", () => {
-    if (transcriptWindow === win) {
-      transcriptWindow = null;
+    const dismissed = transcriptPanel.closed(win);
+    if (!dismissed) return;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("bridge:transcript-window-closed", dismissed.roomId);
     }
   });
 
@@ -728,41 +788,34 @@ function createTray(): void {
 
   tray = new Tray(icon);
   tray.setToolTip(APP_NAME);
-
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: `Show ${APP_NAME}`,
-      click: () => mainWindow?.show(),
-    },
-    { type: "separator" },
-    {
-      label: "Start Translation",
-      click: () => {
-        // TODO: Start audio capture & translation pipeline
-      },
-    },
-    {
-      label: "Stop Translation",
-      click: () => {
-        // TODO: Stop audio capture
-      },
-    },
-    { type: "separator" },
-    {
-      label: "Quit",
-      click: () => {
-        tray?.destroy();
-        tray = null;
-        app.quit();
-      },
-    },
-  ]);
-
-  tray.setContextMenu(contextMenu);
+  refreshTrayMenu();
 
   tray.on("double-click", () => {
     mainWindow?.show();
   });
+}
+
+/**
+ * Rebuilt and set again rather than mutated in place: on Linux a tray menu changed after
+ * `setContextMenu` is not repainted until it is set again, and one code path for every platform is
+ * simpler than remembering which one needs it.
+ */
+function refreshTrayMenu(): void {
+  if (!tray) return;
+  tray.setContextMenu(
+    Menu.buildFromTemplate(
+      trayMenuTemplate(
+        APP_NAME,
+        { meetingPanelAvailable: transcriptPanel.reopenTarget !== null },
+        {
+          showApp: () => mainWindow?.show(),
+          showMeetingPanel: () => void reopenTranscriptWindow(),
+          checkForUpdates: () => void checkForUpdatesInteractive(),
+          quit: () => app.quit(),
+        },
+      ),
+    ),
+  );
 }
 
 function launchWindow(): void {
@@ -991,6 +1044,7 @@ if (!app.requestSingleInstanceLock()) {
 
     launchWindow();
     createTray();
+    initAutoUpdater();
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -1000,6 +1054,8 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("before-quit", () => {
+    // First, and before anything that could throw: this is what lets the windows close.
+    isQuitting = true;
     webRuntime.stop();
     // Child processes this app started do not die with it on their own. The audit found the
     // loopback capture surviving both a renderer crash and quit; the URL sensor is a second such
@@ -1007,6 +1063,21 @@ if (!app.requestSingleInstanceLock()) {
     meetPresenceWatcher.disarm();
     meetUrlSensor.stop();
     void windowsLoopbackRuntime.stop();
+  });
+
+  // Squirrel.Mac's quitAndInstall - which electron-updater's MacUpdater calls - closes every window
+  // before it emits `before-quit`, so the flag would come too late. electron-updater emits this on
+  // its Windows path as well, just before `app.quit()`.
+  autoUpdater.on("before-quit-for-update", () => {
+    isQuitting = true;
+  });
+
+  // Every window, the bridge popup included: a page's `beforeunload` silently cancels the quit in
+  // Electron. See quit-lifecycle.ts shouldIgnoreBeforeUnload.
+  app.on("web-contents-created", (_event, contents) => {
+    contents.on("will-prevent-unload", (event) => {
+      if (shouldIgnoreBeforeUnload({ isQuitting })) event.preventDefault();
+    });
   });
 
   app.on("window-all-closed", () => {

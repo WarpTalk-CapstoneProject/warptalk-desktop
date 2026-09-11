@@ -40,7 +40,14 @@ export default defineConfig({
         input: resolve(__dirname, "src/main/index.ts"),
         // `bindings` too: it is loopback-capture's loader, and bundling it reintroduces the same
         // dynamic-require rewrite one level down.
-        external: ["loopback-capture", "bindings"],
+        //
+        // `electron-updater` for a different reason (WT-618): inlined, rollup's CommonJS pass would
+        // pull fs-extra, js-yaml and builder-util-runtime into the main bundle with it - a shape
+        // none of them are tested in, for the one piece of code that has to keep working after
+        // everything else in a release is broken. Left external it loads as the plain dependency
+        // electron-builder already packs into app.asar.
+        // scripts/check-release-contract.mjs fails CI if this entry is dropped.
+        external: ["loopback-capture", "bindings", "electron-updater"],
       },
     },
   },

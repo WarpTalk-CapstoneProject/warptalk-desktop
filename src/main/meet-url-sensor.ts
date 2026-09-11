@@ -14,6 +14,9 @@
  *   picture-in-pic  there is no omnibox and the document reads `about:blank` — but the window
  *                   chrome shows the origin as a Text label, which is browser UI, not content.
  *                   Host only, so no room code, which is why the code is optional downstream.
+ *                   Believed only when BOTH hold: the document is `about:blank`, and the label is
+ *                   outside the Document subtree. The search used to cover every window and every
+ *                   descendant, so any page whose text said "meet.google.com" read as a call.
  *
  * WHY A LONG-LIVED HELPER AND NOT A SHELL PER POLL
  *   Measured on the target machine: spawning PowerShell per read costs 1.8-3.4 s once the UI
@@ -48,7 +51,7 @@ export interface MeetSighting {
  * The script self-polling would mean two independent intervals for one job. Here PowerShell is a
  * pure function of "look now", and `MeetPresenceWatcher` stays the only thing that decides when.
  */
-const SENSOR_SCRIPT = String.raw`
+export const SENSOR_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type @'
@@ -72,12 +75,29 @@ $BROWSERS = @('chrome','msedge','firefox','brave','opera','vivaldi')
 # this script: it lives inside a template literal, where one would end the string early.
 $CODE_PATH = '^/([a-z]{3,4}-[a-z]{3,4}-[a-z]{3,4})$'
 
+$DOC_TYPE = [System.Windows.Automation.ControlType]::Document
 $docCond = New-Object System.Windows.Automation.PropertyCondition(
-  [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-  [System.Windows.Automation.ControlType]::Document)
-$textCond = New-Object System.Windows.Automation.PropertyCondition(
-  [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-  [System.Windows.Automation.ControlType]::Text)
+  [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $DOC_TYPE)
+# The Meet origin label, exactly: a Text element whose whole name is the host.
+$hostLabelCond = New-Object System.Windows.Automation.AndCondition(
+  (New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Text)),
+  (New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::NameProperty, 'meet.google.com')))
+# Raw view, so that no Document between a label and its window can be filtered out of the walk.
+$walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+
+# Whether an element sits inside a Document, which makes it page content rather than browser UI.
+function Test-InDocument($node, $root) {
+  $parent = $walker.GetParent($node)
+  while ($parent -ne $null) {
+    if ($parent.Current.ControlType.Id -eq $DOC_TYPE.Id) { return $true }
+    if ([System.Windows.Automation.Automation]::Compare($parent, $root)) { return $false }
+    $parent = $walker.GetParent($parent)
+  }
+  return $false
+}
 
 function Get-BrowserWindows {
   $found = New-Object System.Collections.ArrayList
@@ -101,24 +121,35 @@ function Read-Window($w) {
   $el = [System.Windows.Automation.AutomationElement]::FromHandle($w.H)
 
   $doc = $el.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $docCond)
-  if ($doc -ne $null) {
-    $value = ''
-    try { $value = $doc.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch {}
-    if ($value -match '^https?://') {
-      try {
-        $uri = [Uri]$value
-        # Exact host equality, never a substring: 'evil.com/meet.google.com/abc-def-ghi' and
-        # 'meet.google.com.evil.com' both contain the string and neither is Google.
-        if ($uri.Host -eq 'meet.google.com' -and $uri.AbsolutePath -match $CODE_PATH) {
-          return @{ meetCode = $Matches[1]; processId = $w.Pid; via = 'document' }
-        }
-      } catch {}
-    }
+  if ($doc -eq $null) { return $null }
+
+  $value = ''
+  try { $value = $doc.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch {}
+  if ($value -match '^https?://') {
+    try {
+      $uri = [Uri]$value
+      # Exact host equality, never a substring: 'evil.com/meet.google.com/abc-def-ghi' and
+      # 'meet.google.com.evil.com' both contain the string and neither is Google.
+      if ($uri.Host -eq 'meet.google.com' -and $uri.AbsolutePath -match $CODE_PATH) {
+        return @{ meetCode = $Matches[1]; processId = $w.Pid; via = 'document' }
+      }
+    } catch {}
+    # A page with a real address is a page, and that address was not Meet. Nothing else in this
+    # window gets a say: the label search below would otherwise read the page's own text.
+    return $null
   }
 
-  $texts = $el.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCond)
-  for ($i = 0; $i -lt $texts.Count; $i++) {
-    if ($texts.Item($i).Current.Name -eq 'meet.google.com') {
+  # Picture-in-picture, and only picture-in-picture. Two gates, because each alone was spoofable:
+  #   about:blank  a PiP window's document has no address of its own. A normal tab on any site
+  #                does, and this search used to run on those too - so a page that merely MENTIONED
+  #                meet.google.com was reported as a call (reproduced on Chrome 152).
+  #   outside the Document  the origin label is browser chrome. A page can open its own blank PiP
+  #                and write the host into it, but what it writes lands inside the Document; the
+  #                chrome's label names the opener's real origin, which the page cannot choose.
+  if ($value -ne 'about:blank') { return $null }
+  $labels = $el.FindAll([System.Windows.Automation.TreeScope]::Descendants, $hostLabelCond)
+  for ($i = 0; $i -lt $labels.Count; $i++) {
+    if (-not (Test-InDocument $labels.Item($i) $el)) {
       return @{ meetCode = $null; processId = $w.Pid; via = 'pip' }
     }
   }
