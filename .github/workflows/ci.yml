@@ -1,0 +1,61 @@
+name: CI
+
+# Until this file existed the only workflow in the repo was release.yml, which runs on a tag. A pull
+# request into `development` was therefore never built or tested by anything, and "green before
+# merge" could not be checked because there was nothing to be green. This is the gate that rule
+# needs: every PR, and every push to the two long-lived branches.
+on:
+  pull_request:
+  push:
+    branches:
+      - development
+      - main
+
+permissions:
+  contents: read
+
+# A new push to the same PR makes the older run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    # Windows, because that is where the bridge runs: the Meet sensor is a PowerShell/UI Automation
+    # helper and the loopback runtime targets Windows process loopback, and one of the tests parses
+    # the sensor script with the real PowerShell parser - on any other runner it is skipped.
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 24, not the 20 release.yml builds with: `test:main` loads TypeScript through
+      # --experimental-strip-types (Node 22.6+) and hands `--test` a glob (Node 21+).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # --ignore-scripts: nothing here needs what the install scripts produce. Electron's postinstall
+      # downloads a ~100 MB runtime nobody launches, and the optional `loopback-capture` addon would
+      # compile natively; the tests reach it through an injected seam, and the typecheck needs only
+      # the type packages, which install without scripts.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Main-process tests
+        run: npm run test:main
+
+      # Cheap, and the failure it guards (a macOS build that cannot be opened) otherwise only shows
+      # up after a 20-minute release build has already published it.
+      - name: Check macOS signing contract
+        run: npm run check:mac-signing
+
+      # `npm run lint` is deliberately absent: the repo has no ESLint config, so the script fails
+      # before linting anything. Add the step together with a config, not before.
