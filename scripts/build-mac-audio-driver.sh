@@ -52,7 +52,15 @@ SOURCE="$WORK/BlackHole/BlackHole/BlackHole.c"
 echo "BlackHole $BLACKHOLE_REF ($UPSTREAM_COMMIT)"
 
 ICON="$WORK/WarpTalk.icns"
-sips -s format icns "$ROOT/resources/warptalk-logo-primary.png" --out "$ICON" >/dev/null
+# `sips -s format icns` exits 13 ("Unable to write image") on current macOS;
+# iconutil from a full iconset is the supported path.
+ICONSET="$WORK/WarpTalk.iconset"
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" "$ROOT/resources/warptalk-logo-primary.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  sips -z "$((size * 2))" "$((size * 2))" "$ROOT/resources/warptalk-logo-primary.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$ICON"
 
 mkdir -p "$OUT"
 
@@ -86,6 +94,7 @@ for variant in "${VARIANTS[@]}"; do
       CONFIGURATION_BUILD_DIR="$build_dir" \
       ARCHS="arm64 x86_64" \
       ONLY_ACTIVE_ARCH=NO \
+      MACOSX_DEPLOYMENT_TARGET=12.0 \
       CODE_SIGNING_ALLOWED=NO \
       PRODUCT_BUNDLE_IDENTIFIER="$bundle_id" \
       >"$WORK/$name.log" 2>&1; then
