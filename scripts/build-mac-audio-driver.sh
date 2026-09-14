@@ -51,8 +51,19 @@ UPSTREAM_COMMIT="$(git -C "$WORK/BlackHole" rev-parse HEAD)"
 SOURCE="$WORK/BlackHole/BlackHole/BlackHole.c"
 echo "BlackHole $BLACKHOLE_REF ($UPSTREAM_COMMIT)"
 
+# Through an iconset and iconutil, not `sips -s format icns`. Current macOS sips cannot write icns at
+# all — it fails with "Error 13" on this exact 1024x1024 PNG — and because the release step is
+# continue-on-error, v0.4.2 shipped with no audio devices while its run stayed green.
 ICON="$WORK/WarpTalk.icns"
-sips -s format icns "$ROOT/resources/warptalk-logo-primary.png" --out "$ICON" >/dev/null
+ICONSET="$WORK/WarpTalk.iconset"
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" "$ROOT/resources/warptalk-logo-primary.png" \
+    --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  sips -z "$((size * 2))" "$((size * 2))" "$ROOT/resources/warptalk-logo-primary.png" \
+    --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$ICON"
 
 mkdir -p "$OUT"
 
@@ -86,6 +97,7 @@ for variant in "${VARIANTS[@]}"; do
       CONFIGURATION_BUILD_DIR="$build_dir" \
       ARCHS="arm64 x86_64" \
       ONLY_ACTIVE_ARCH=NO \
+      MACOSX_DEPLOYMENT_TARGET=12.0 \
       CODE_SIGNING_ALLOWED=NO \
       PRODUCT_BUNDLE_IDENTIFIER="$bundle_id" \
       >"$WORK/$name.log" 2>&1; then

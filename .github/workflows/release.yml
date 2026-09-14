@@ -72,9 +72,17 @@ jobs:
       # earlier release behaved. Ad-hoc signed until a Developer ID identity is in the keychain at
       # this step (MAC_DRIVER_SIGN_IDENTITY, WT-674).
       - name: Build WarpTalk audio devices (macOS)
+        id: audio-devices
         if: runner.os == 'macOS'
         continue-on-error: true
         run: bash scripts/build-mac-audio-driver.sh
+
+      # continue-on-error makes the step's conclusion "success" whatever happened, so a failure here
+      # is invisible from the run page. v0.4.2 shipped without the devices that way (sips could not
+      # write the icon) and nobody saw it until the job log was read. Allowed to fail, not to hide.
+      - name: Warn when the audio devices were not built
+        if: runner.os == 'macOS' && steps.audio-devices.outcome == 'failure'
+        run: echo "::warning title=WarpTalk audio devices missing::build-mac-audio-driver.sh failed; this macOS build ships without WarpTalk Microphone/Speaker and falls back to BlackHole. Read the 'Build WarpTalk audio devices' step log."
 
       # Code signing is opt-in, and the certificates are not bought yet.
       #
