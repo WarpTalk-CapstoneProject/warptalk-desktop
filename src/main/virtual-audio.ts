@@ -12,9 +12,11 @@
  *             inside Google Meet.
  *   inbound   WarpTalk captures the far side's audio from the meeting app.
  *
- * macOS uses two BlackHole devices. Windows primary uses one free VB-CABLE device for outbound
- * and per-process loopback for inbound, so the user's own dub is outside the captured process
- * tree instead of being separated by a second cable.
+ * macOS uses two BlackHole devices. Windows prefers two free VB-Audio cables — VB-CABLE out and
+ * Hi-Fi Cable back — because pointing Meet's own speaker picker at the second cable captures the
+ * Meet tab and nothing else. Where Hi-Fi Cable is not installed, inbound falls back to per-process
+ * loopback, which takes the whole browser (R9) but still keeps the user's own dub out, because the
+ * dub plays from WarpTalk's process tree.
  */
 
 import fs from "fs";
@@ -70,27 +72,70 @@ export interface VirtualAudioRiskControl {
   control: string;
 }
 
+interface MacDeviceSet {
+  providerId: string;
+  providerName: string;
+  devices: ReadonlyArray<
+    Omit<VirtualAudioDevice, "installed" | "providerId" | "providerName" | "providerRole">
+  >;
+}
+
 /**
- * BlackHole is the device the bridge targets on macOS: it is MIT licensed, so it can be
- * redistributed, and it installs several independent variants side by side, which is exactly what
- * the two-device requirement needs. 2ch carries the outbound voice and 16ch the inbound mix;
- * which variant takes which leg is arbitrary, but it has to stay fixed or a user who configured
- * Meet once would find the directions swapped under them.
+ * The two-device sets the bridge accepts on macOS, preferred first.
+ *
+ * WarpTalk's own pair is BlackHole's source built under WarpTalk's names by
+ * scripts/build-mac-audio-driver.sh and installed from inside the app. It is not called BlackHole
+ * because it may not be: BlackHole's source is GPL-3.0, and its licence withholds the name and
+ * branding from modified builds. (This comment used to call BlackHole MIT-licensed; it is not.)
+ *
+ * Upstream BlackHole stays accepted, so every Mac set up before the rename keeps working. Within a
+ * set, which device takes which leg is arbitrary but fixed — a user who configured Meet once would
+ * otherwise find the directions swapped under them.
  */
-const MAC_DEVICES: ReadonlyArray<Omit<VirtualAudioDevice, "installed">> = [
-  { leg: "outbound", driverBundle: "BlackHole2ch.driver", deviceName: "BlackHole 2ch" },
-  { leg: "inbound", driverBundle: "BlackHole16ch.driver", deviceName: "BlackHole 16ch" },
+const MAC_DEVICE_SETS: ReadonlyArray<MacDeviceSet> = [
+  {
+    providerId: "warptalk-audio",
+    providerName: "WarpTalk Audio",
+    devices: [
+      { leg: "outbound", driverBundle: "WarpTalkMicrophone.driver", deviceName: "WarpTalk Microphone" },
+      { leg: "inbound", driverBundle: "WarpTalkSpeaker.driver", deviceName: "WarpTalk Speaker" },
+    ],
+  },
+  {
+    providerId: "blackhole",
+    providerName: "BlackHole",
+    devices: [
+      { leg: "outbound", driverBundle: "BlackHole2ch.driver", deviceName: "BlackHole 2ch" },
+      { leg: "inbound", driverBundle: "BlackHole16ch.driver", deviceName: "BlackHole 16ch" },
+    ],
+  },
 ];
+
+/** The driver bundles this app carries and installs itself. */
+export const MAC_BUNDLED_DRIVERS: readonly string[] = MAC_DEVICE_SETS[0]!.devices.map(
+  (device) => device.driverBundle,
+);
 
 interface VirtualAudioProvider {
   id: string;
   name: string;
   platform: NodeJS.Platform;
   role: "primary" | "backup";
-  mode: "full" | "outbound-only";
+  mode: "full" | "outbound-only" | "inbound-only";
   runtime: "passive" | "requires-engine";
   devices: ReadonlyArray<Omit<VirtualAudioDevice, "installed" | "providerId" | "providerName">>;
+  /**
+   * The provider's other endpoint names, which are not routed through but are not foreign either.
+   *
+   * A cable is two endpoints. Detection keys on the one the user selects in Meet, and without this
+   * its sibling — "CABLE Input", which the registry lists right beside "CABLE Output" — was reported
+   * as somebody else's driver.
+   */
+  ownEndpoints?: readonly string[];
 }
+
+/** The second free cable. See WINDOWS_PROVIDERS. */
+const WINDOWS_INBOUND_CABLE_ID = "hifi-cable-free";
 
 const WINDOWS_PROCESS_LOOPBACK_MIN_BUILD = 20348;
 
@@ -173,7 +218,7 @@ const WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS: ReadonlyArray<VirtualAudioRiskC
   {
     id: "B2",
     status: "known-limitation",
-    control: "The free VB-CABLE driver provides one cable; inbound must use process loopback or a backup provider.",
+    control: "The free VB-CABLE driver provides one cable; inbound rides the free Hi-Fi Cable when it is installed, and otherwise must use process loopback or a backup provider.",
   },
   {
     id: "X1",
@@ -197,6 +242,38 @@ const WINDOWS_PROVIDERS: ReadonlyArray<VirtualAudioProvider> = [
         deviceName: "CABLE Output (VB-Audio Virtual Cable)",
       },
     ],
+    ownEndpoints: ["CABLE Input (VB-Audio Virtual Cable)"],
+  },
+  /**
+   * Hi-Fi Cable, VB-Audio's other free cable, carrying the far side back.
+   *
+   * Free for end users like VB-CABLE, and installable beside it — which is the point: two free
+   * cables give Windows the same two-device bridge BlackHole gives macOS, without VB-CABLE A+B.
+   * Meet's speaker is pointed at Hi-Fi Cable Input; WarpTalk records Hi-Fi Cable Output.
+   *
+   * Two things are not yet confirmed on a real Windows 10/11 machine: the exact "(VB-Audio …)"
+   * suffix, which is why matching is by the stem, and the driver itself, whose download page still
+   * lists Windows 8 as the newest release target. It also passes no sound unless both of its sides
+   * are set to the same sample rate, which the setup copy tells the user.
+   *
+   * Not a separate recommendation: VB-CABLE stays `recommendedProviderId`, because it is the leg
+   * without which nothing reaches the meeting at all. This one upgrades the inbound leg.
+   */
+  {
+    id: WINDOWS_INBOUND_CABLE_ID,
+    name: "Hi-Fi Cable",
+    platform: "win32",
+    role: "primary",
+    mode: "inbound-only",
+    runtime: "passive",
+    devices: [
+      {
+        leg: "inbound",
+        driverBundle: "Hi-Fi Cable",
+        deviceName: "Hi-Fi Cable Output (VB-Audio Hi-Fi Cable)",
+      },
+    ],
+    ownEndpoints: ["Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)"],
   },
   {
     id: "voicemeeter-banana",
@@ -236,7 +313,7 @@ function withProvider(
 
 /** Bundles that belong to something else, so they are reported rather than used. */
 function isOurs(bundle: string): boolean {
-  return MAC_DEVICES.some((device) => device.driverBundle === bundle);
+  return MAC_DEVICE_SETS.some((set) => set.devices.some((device) => device.driverBundle === bundle));
 }
 
 function readHalDirectory(): string[] {
@@ -256,10 +333,24 @@ function normalizeDeviceName(name: string): string {
   return name.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Whether one registry string names `expected`.
+ *
+ * The registry lists an endpoint under several strings — the friendly name "CABLE Output
+ * (VB-Audio Virtual Cable)" and the bare description "CABLE Output" among them — so the stem before
+ * the parenthesis has to match on its own. It used to match as a SUBSTRING, and that stopped being
+ * safe the moment a second cable was registered: "cable output" is inside "Hi-Fi Cable Output", so a
+ * machine with only Hi-Fi Cable read as having VB-CABLE. The stem now has to START the name.
+ */
+function matchesDeviceName(name: string, expected: string): boolean {
+  const candidate = normalizeDeviceName(name);
+  const stem = normalizeDeviceName(expected.split(" (")[0] ?? expected);
+  return candidate === normalizeDeviceName(expected) || candidate === stem || candidate.startsWith(`${stem} (`);
+}
+
 function includesDeviceName(names: ReadonlySet<string>, expected: string): boolean {
-  const needle = normalizeDeviceName(expected.split(" (")[0] ?? expected);
   for (const name of names) {
-    if (normalizeDeviceName(name).includes(needle)) return true;
+    if (matchesDeviceName(name, expected)) return true;
   }
   return false;
 }
@@ -336,28 +427,40 @@ export function describeWindowsVirtualAudioForEndpoints(
     ({ provider, ready }) =>
       provider.role === "backup" && provider.runtime === "requires-engine" && ready,
   );
+  const inboundCable = providers.find(
+    ({ provider, ready }) => provider.id === WINDOWS_INBOUND_CABLE_ID && ready,
+  );
   const processLoopback = buildNumber >= WINDOWS_PROCESS_LOOPBACK_MIN_BUILD;
+  // Both free cables make a full bridge on their own, with no process loopback involved — so it
+  // holds on a Windows build too old for loopback, and it outranks an installed Voicemeeter.
+  const twoFreeCables = outboundProvider && inboundCable ? { outboundProvider, inboundCable } : null;
   const detectedProvider =
     (processLoopback ? outboundProvider : undefined) ??
     installedBackupProvider ??
     outboundProvider ??
     primaryProvider;
-  const mode = outboundProvider && processLoopback
-    ? "outbound-only"
-    : installedBackupProvider
-      ? "installed-not-running"
-      : "caption-only";
+  const mode = twoFreeCables
+    ? "full"
+    : outboundProvider && processLoopback
+      ? "outbound-only"
+      : installedBackupProvider
+        ? "installed-not-running"
+        : "caption-only";
 
   return {
     platform: "win32",
     supported: true,
-    devices: detectedProvider.devices,
-    ready: false,
+    // VB-CABLE first, as everywhere else: the loopback start gate looks for it by provider id, and
+    // it is still the device the dub leaves through.
+    devices: twoFreeCables
+      ? [...twoFreeCables.outboundProvider.devices, ...twoFreeCables.inboundCable.devices]
+      : detectedProvider.devices,
+    ready: twoFreeCables !== null,
     bridgeMode: mode,
     recommendedProviderId: primaryProvider.provider.id,
     capabilities: {
-      fullBridge: false,
-      outboundOnly: mode === "outbound-only",
+      fullBridge: twoFreeCables !== null,
+      outboundOnly: mode === "outbound-only" || mode === "full",
       captionOnly: true,
       processLoopback,
       processLoopbackRuntime: processLoopback && runtimeReady ? "available" : "not-wired",
@@ -366,8 +469,10 @@ export function describeWindowsVirtualAudioForEndpoints(
     riskControls: [...WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS],
     foreignDrivers: Array.from(endpointNames).filter(
       (name) =>
-        !WINDOWS_PROVIDERS.some((provider) =>
-          provider.devices.some((device) => includesDeviceName(new Set([name]), device.deviceName)),
+        !WINDOWS_PROVIDERS.some(
+          (provider) =>
+            provider.devices.some((device) => matchesDeviceName(name, device.deviceName)) ||
+            (provider.ownEndpoints ?? []).some((endpoint) => matchesDeviceName(name, endpoint)),
         ),
     ),
   };
@@ -412,28 +517,49 @@ export function detectVirtualAudio(runtimeReady = false): VirtualAudioStatus {
     };
   }
 
-  const present = readHalDirectory();
-  const devices = MAC_DEVICES.map((device) => ({
-    ...device,
-    installed: present.includes(device.driverBundle),
-  }));
+  return describeMacVirtualAudio(readHalDirectory());
+}
+
+/**
+ * Which accepted pair a Mac is using, from the bundles in its HAL directory.
+ *
+ * The pair with more devices installed wins, and WarpTalk's own on a tie. Choosing by count rather
+ * than "any WarpTalk device present" keeps a Mac with a complete BlackHole install on BlackHole
+ * while a WarpTalk install is half done, instead of swapping the names the user selected in Meet
+ * for two devices that do not all exist yet.
+ */
+export function describeMacVirtualAudio(presentBundles: readonly string[]): VirtualAudioStatus {
+  const candidates = MAC_DEVICE_SETS.map((set, index) => {
+    const devices: VirtualAudioDevice[] = set.devices.map((device) => ({
+      ...device,
+      installed: presentBundles.includes(device.driverBundle),
+      providerId: set.providerId,
+      providerName: set.providerName,
+      providerRole: index === 0 ? "primary" : "backup",
+    }));
+    return { devices, installedCount: devices.filter((device) => device.installed).length };
+  });
+  const chosen = candidates.reduce((best, next) =>
+    next.installedCount > best.installedCount ? next : best,
+  );
+  const ready = chosen.devices.every((device) => device.installed);
 
   return {
-    platform: process.platform,
+    platform: "darwin",
     supported: true,
-    devices,
-    ready: devices.every((device) => device.installed),
-    bridgeMode: devices.every((device) => device.installed) ? "full" : "caption-only",
-    recommendedProviderId: "blackhole",
+    devices: chosen.devices,
+    ready,
+    bridgeMode: ready ? "full" : "caption-only",
+    recommendedProviderId: MAC_DEVICE_SETS[0]!.providerId,
     capabilities: {
-      fullBridge: devices.every((device) => device.installed),
-      outboundOnly: devices.every((device) => device.installed),
+      fullBridge: ready,
+      outboundOnly: ready,
       captionOnly: true,
       processLoopback: false,
       processLoopbackRuntime: "not-wired",
     },
     riskControls: [],
-    foreignDrivers: present.filter((bundle) => !isOurs(bundle)),
+    foreignDrivers: presentBundles.filter((bundle) => !isOurs(bundle)),
   };
 }
 
@@ -466,4 +592,60 @@ export function hasHomebrew(): boolean {
   return ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"].some((candidate) =>
     fs.existsSync(candidate),
   );
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The shell script that installs WarpTalk's own audio devices, run once with administrator rights.
+ *
+ * Mirrors what BlackHole's installer package does in its pre- and postinstall scripts: the HAL
+ * directory owned by root:wheel, the bundle root:wheel with 755 directories and 644 files, its
+ * executable 755. Two additions. The quarantine flag is stripped, because `cp` carries it over
+ * from a downloaded app. And coreaudiod is restarted, which is what makes the devices appear now
+ * rather than after the reboot BlackHole's own installer asks for.
+ *
+ * A bundle of the same name is replaced, so installing again is how an update is applied. Nothing
+ * else in the HAL directory is touched, and a bundle name that is not a plain `Name.driver` is
+ * refused before any of it runs.
+ */
+export function buildMacDriverInstallScript(
+  sourceDirectory: string,
+  bundles: readonly string[] = MAC_BUNDLED_DRIVERS,
+): string {
+  const hal = shellQuote(MAC_HAL_DIRECTORY);
+  const steps = ["set -e", `mkdir -p ${hal}`, `chown root:wheel ${hal}`, `chmod 755 ${hal}`];
+
+  for (const bundle of bundles) {
+    if (!/^[A-Za-z0-9]+\.driver$/.test(bundle)) {
+      throw new Error(`Refusing to install an unexpected driver bundle name: ${bundle}`);
+    }
+    const target = shellQuote(`${MAC_HAL_DIRECTORY}/${bundle}`);
+    steps.push(
+      `rm -rf ${target}`,
+      `cp -R ${shellQuote(`${sourceDirectory}/${bundle}`)} ${target}`,
+      `xattr -dr com.apple.quarantine ${target} || true`,
+      `chown -R root:wheel ${target}`,
+      `find ${target} -type d -exec chmod 755 {} +`,
+      `find ${target} -type f -exec chmod 644 {} +`,
+      `chmod 755 ${target}/Contents/MacOS/*`,
+    );
+  }
+
+  steps.push("killall coreaudiod || true");
+  return steps.join("; ");
+}
+
+/**
+ * The AppleScript that runs `script` as administrator.
+ *
+ * `do shell script ... with administrator privileges` puts up macOS's own password prompt, so the
+ * password goes to macOS and never passes through WarpTalk. The script travels as an AppleScript
+ * string literal, in which only backslash and double quote are special.
+ */
+export function toAppleScriptAdminCommand(script: string): string {
+  const literal = script.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `do shell script "${literal}" with administrator privileges`;
 }
