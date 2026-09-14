@@ -76,6 +76,17 @@ export class MeetPresenceWatcher {
     return this.lastProcessId;
   }
 
+  /**
+   * The Meet room code of the call on screen, when the last sighting carried one.
+   *
+   * Read by the offer window, so the room it creates can store the call's own link: without it an
+   * impromptu bridge room could never be told apart from another Meet call, and the schedule never
+   * showed it as a Google Meet meeting.
+   */
+  get meetCode(): string | null {
+    return this.last?.meetWindowVisible ? (this.last.meetCode ?? null) : null;
+  }
+
   /** Idempotent: arming an armed watcher keeps the one interval it already has. */
   arm(): void {
     if (this.timer) return;

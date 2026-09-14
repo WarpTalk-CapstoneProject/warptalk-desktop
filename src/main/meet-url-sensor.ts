@@ -39,8 +39,11 @@ import path from "path";
 export interface MeetSighting {
   /** Present only from a normal window; picture-in-picture exposes the host without the path. */
   meetCode: string | null;
-  /** The browser process that owns the window. Kept in main — the renderer never needs it. */
-  processId: number;
+  /**
+   * The browser process that owns the window. Kept in main — the renderer never needs it.
+   * Null from the macOS sensor, which asks the browser over Apple Events and never sees a window.
+   */
+  processId: number | null;
   /** Which read produced this, for diagnosing a machine where one path works and the other does not. */
   via: "document" | "pip";
 }
