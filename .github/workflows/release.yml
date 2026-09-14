@@ -66,6 +66,16 @@ jobs:
       - name: Check release / auto-update contract
         run: npm run check:release
 
+      # WarpTalk Microphone and WarpTalk Speaker, built from BlackHole's GPL-3.0 source under
+      # WarpTalk's own names and packaged by the mac extraResources entry. Allowed to fail: the app
+      # then ships without them and asks for upstream BlackHole instead, which is exactly how every
+      # earlier release behaved. Ad-hoc signed until a Developer ID identity is in the keychain at
+      # this step (MAC_DRIVER_SIGN_IDENTITY, WT-674).
+      - name: Build WarpTalk audio devices (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: bash scripts/build-mac-audio-driver.sh
+
       # Code signing is opt-in, and the certificates are not bought yet.
       #
       # These used to be listed directly in the build step's `env:`, on the assumption that an

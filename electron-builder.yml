@@ -48,6 +48,12 @@ extraResources:
 mac:
   icon: resources/warptalk-logo-primary.png
   category: public.app-category.productivity
+  # WarpTalk Microphone and WarpTalk Speaker, built from BlackHole's source by
+  # scripts/build-mac-audio-driver.sh. The folder is committed with only a README, so a build that
+  # skipped that step still packages and the app falls back to asking for upstream BlackHole.
+  extraResources:
+    - from: resources/audio-drivers
+      to: audio-drivers
   # electron-builder supplies the microphone and camera strings by default but
   # not this one, and macOS refuses to capture a screen without it.
   extendInfo:
