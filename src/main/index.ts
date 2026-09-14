@@ -41,9 +41,12 @@ import {
 import {
   BLACKHOLE_BREW_COMMAND,
   BLACKHOLE_DOWNLOAD_PAGE,
+  MAC_BUNDLED_DRIVERS,
   VBCABLE_DOWNLOAD_PAGE,
+  buildMacDriverInstallScript,
   detectVirtualAudio,
   hasHomebrew,
+  toAppleScriptAdminCommand,
 } from "./virtual-audio";
 import { WebRuntimeService } from "./web-runtime";
 import {
@@ -644,11 +647,16 @@ async function runVirtualAudioInstaller(): Promise<{ started: boolean; reason?: 
   if (process.platform === "win32") {
     const { response } = await dialog.showMessageBox({
       type: "info",
-      message: "Install the Windows audio bridge cable",
+      message: "Install the Windows audio bridge cables",
       detail:
-        "Windows bridge mode uses the free VB-CABLE driver for the outbound leg. Install it from " +
-        "VB-Audio, reboot if the installer asks, then choose CABLE Output as the microphone in " +
-        "your meeting app.\n\n" +
+        "The bridge uses two free VB-Audio drivers, both on the same download page: VB-CABLE " +
+        "carries your translated voice into the meeting, and Hi-Fi Cable carries the meeting back " +
+        "to WarpTalk. Install both and restart if an installer asks.\n\n" +
+        "Then, in Google Meet's audio settings, choose CABLE Output as the microphone and Hi-Fi " +
+        "Cable Input as the speaker. In Windows Sound settings, set Hi-Fi Cable Input and Hi-Fi " +
+        "Cable Output to the same format, 48000 Hz — it passes no sound when they differ.\n\n" +
+        "Without Hi-Fi Cable, WarpTalk still works but listens to your whole browser, so sound " +
+        "from other tabs is translated too.\n\n" +
         "WarpTalk does not install a driver silently or change your Windows default audio device.",
       buttons: ["Open the download page", "Not now"],
       cancelId: 1,
@@ -665,6 +673,13 @@ async function runVirtualAudioInstaller(): Promise<{ started: boolean; reason?: 
 
   if (process.platform !== "darwin") {
     return { started: false, reason: "unsupported-platform" };
+  }
+
+  // WarpTalk's own devices, when this build carries them (scripts/build-mac-audio-driver.sh). A build
+  // without them falls through to the BlackHole instructions below, as every earlier release did.
+  const bundledDrivers = getDesktopAssetPath("audio-drivers");
+  if (MAC_BUNDLED_DRIVERS.every((bundle) => fs.existsSync(path.join(bundledDrivers, bundle)))) {
+    return installBundledMacDrivers(bundledDrivers);
   }
 
   const brew = hasHomebrew();
@@ -699,6 +714,58 @@ async function runVirtualAudioInstaller(): Promise<{ started: boolean; reason?: 
 
   openExternalUrl(BLACKHOLE_DOWNLOAD_PAGE);
   return { started: true, reason: "download-page-opened" };
+}
+
+/**
+ * Installs WarpTalk Microphone and WarpTalk Speaker from the copies inside this app.
+ *
+ * The user agrees twice before anything privileged happens: once in this dialog, which says what
+ * is about to be installed and where, and once in macOS's own password prompt.
+ */
+async function installBundledMacDrivers(
+  sourceDirectory: string,
+): Promise<{ started: boolean; reason?: string }> {
+  const { response } = await dialog.showMessageBox({
+    type: "info",
+    message: "Install WarpTalk's audio devices",
+    detail:
+      "An external meeting needs two virtual audio devices so Google Meet can send and receive " +
+      'translated audio. WarpTalk adds them to this Mac as "WarpTalk Microphone" and "WarpTalk ' +
+      'Speaker".\n\n' +
+      "They install system-wide, so macOS asks for your administrator password. The devices " +
+      "appear straight away, with no restart. To remove them later, delete the WarpTalk entries " +
+      "from /Library/Audio/Plug-Ins/HAL.",
+    buttons: ["Install", "Not now"],
+    cancelId: 1,
+    defaultId: 0,
+  });
+  if (response === 1) {
+    return { started: false, reason: "declined" };
+  }
+
+  const script = buildMacDriverInstallScript(sourceDirectory);
+  const result = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
+    const child = spawn("osascript", ["-e", toAppleScriptAdminCommand(script)]);
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => resolve({ code: -1, stderr: error.message }));
+    child.on("close", (code) => resolve({ code, stderr }));
+  });
+
+  if (result.code === 0) {
+    return { started: true, reason: "installed" };
+  }
+  // -128 is AppleScript's "User canceled": the password prompt was dismissed, not a failure.
+  if (/-128/.test(result.stderr)) {
+    return { started: false, reason: "declined" };
+  }
+  dialog.showErrorBox(
+    "WarpTalk could not install its audio devices",
+    result.stderr.trim() || "The installer stopped without saying why.",
+  );
+  return { started: false, reason: "install-failed" };
 }
 
 /**
