@@ -37,5 +37,13 @@
     <true/>
     <key>com.apple.security.device.camera</key>
     <true/>
+
+    <!--
+      The Google Meet sensor asks the browser for its tab's address over Apple Events
+      (src/main/meet-url-sensor-mac.ts). Under an enforced hardened runtime, sending them at all needs
+      this key; NSAppleEventsUsageDescription is what the resulting prompt says.
+    -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
   </dict>
 </plist>
