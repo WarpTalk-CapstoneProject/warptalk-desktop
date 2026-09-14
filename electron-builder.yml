@@ -60,6 +60,12 @@ mac:
     NSScreenCaptureUsageDescription: >-
       Warptalk needs to record the screen so you can present it to the other
       people in a meeting.
+    # Without this string macOS refuses Apple Events outright, with no prompt, and the Google Meet
+    # sensor (src/main/meet-url-sensor-mac.ts) never sees a call.
+    NSAppleEventsUsageDescription: >-
+      WarpTalk checks whether your browser is showing a Google Meet call, so it
+      can offer to translate it. It only reads the address of the tab you are
+      looking at.
   # macos-latest runners are Apple Silicon, so building the host arch alone
   # would ship a dmg that refuses to launch on every Intel Mac.
   target:

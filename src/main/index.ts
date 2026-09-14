@@ -29,6 +29,7 @@ import {
 } from "./windows-loopback-runtime";
 import { MeetPresenceWatcher } from "./meet-presence";
 import { MeetUrlSensor } from "./meet-url-sensor";
+import { MacMeetUrlSensor } from "./meet-url-sensor-mac";
 import { TranscriptPanelLedger } from "./transcript-panel";
 import { trayMenuTemplate } from "./tray-menu";
 import { shouldHideOnClose, shouldIgnoreBeforeUnload } from "./quit-lifecycle";
@@ -80,11 +81,13 @@ const audioRuntime = new AudioRuntimeService();
  * The sensor reads the browser's own URL rather than the window title. A title is written by the
  * page and so is worthless as a trust boundary; an address is not. See meet-url-sensor.ts.
  *
- * Off Windows the sensor has no implementation and every read fails, which the watcher treats as
+ * Windows reads it through UI Automation; macOS asks the browser over Apple Events, which raises
+ * the system's own "WarpTalk wants to control Google Chrome" prompt the first time (see
+ * meet-url-sensor-mac.ts). Linux has no sensor: every read fails, which the watcher treats as
  * "could not look" and therefore reports nothing. That degrades to the schedule-only trigger,
  * which needs no window knowledge at all - a worse answer, never a wrong one.
  */
-const meetUrlSensor = new MeetUrlSensor();
+const meetUrlSensor = process.platform === "darwin" ? new MacMeetUrlSensor() : new MeetUrlSensor();
 
 const meetPresenceWatcher = new MeetPresenceWatcher({
   readMeetSighting: () => meetUrlSensor.read(),
@@ -514,9 +517,15 @@ async function openTranscriptWindow(
     return;
   }
 
+  // The offer carries the call's room code when the sensor read one, so the room it creates stores
+  // the Meet link and shows as a Google Meet meeting. The code is the sensor's own reading of the
+  // browser address, never something the page could have written.
+  const offerMeetCode = meetPresenceWatcher.meetCode;
   const target = roomId
     ? `${resolvedWebOrigin}${TRANSCRIPT_ROUTE}/${encodeURIComponent(roomId)}`
-    : `${resolvedWebOrigin}${BRIDGE_OFFER_ROUTE}`;
+    : `${resolvedWebOrigin}${BRIDGE_OFFER_ROUTE}${
+        offerMeetCode ? `?meetCode=${encodeURIComponent(offerMeetCode)}` : ""
+      }`;
 
   const existing = transcriptPanel.window;
   if (existing && !existing.isDestroyed()) {
