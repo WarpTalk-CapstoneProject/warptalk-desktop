@@ -84,6 +84,34 @@ jobs:
         if: runner.os == 'macOS' && steps.audio-devices.outcome == 'failure'
         run: echo "::warning title=WarpTalk audio devices missing::build-mac-audio-driver.sh failed; this macOS build ships without WarpTalk Microphone/Speaker and falls back to BlackHole. Read the 'Build WarpTalk audio devices' step log."
 
+      # VB-CABLE and Hi-Fi Cable (VB-Audio donationware), packaged by the win extraResources entry and
+      # installed by resources/installer.nsh. Official packs only, pinned by SHA-256: a changed file on
+      # VB-Audio's server fails this step instead of shipping something nobody checked. Allowed to
+      # fail like the macOS devices - the installer then skips the cables - but never silently.
+      - name: Fetch VB-Audio bridge cables (Windows)
+        id: windows-cables
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $dest = "resources/windows-audio-drivers"
+          $packs = @(
+            @{ Url = "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip"; Sha = "b950e39f01af1d04ea623c8f6d8eb9b6ea5c477c637295fabf20631c85116bfb"; Into = "vbcable" },
+            @{ Url = "https://download.vb-audio.com/Download_CABLE/HiFiCableAsioBridgeSetup_v1007.zip"; Sha = "3ecf204bfd8579d36bb918f9856eb1eaddd49c75146f5e8a8f59dcb8375ae89a"; Into = "hifi" }
+          )
+          foreach ($pack in $packs) {
+            $zip = Join-Path $env:RUNNER_TEMP "$($pack.Into).zip"
+            Invoke-WebRequest -Uri $pack.Url -OutFile $zip
+            $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $pack.Sha) { throw "$($pack.Url) SHA-256 is $actual, expected $($pack.Sha)" }
+            Expand-Archive -Path $zip -DestinationPath (Join-Path $dest $pack.Into) -Force
+          }
+          Get-ChildItem -Recurse $dest -Filter *Setup*.exe | ForEach-Object { $_.FullName }
+
+      - name: Warn when the bridge cables were not fetched
+        if: runner.os == 'Windows' && steps.windows-cables.outcome == 'failure'
+        run: echo "::warning title=Windows bridge cables missing::The VB-Audio packs could not be fetched or failed their SHA-256 check; this Windows installer skips the cables. Read the 'Fetch VB-Audio bridge cables' step log."
+
       # Code signing is opt-in, and the certificates are not bought yet.
       #
       # These used to be listed directly in the build step's `env:`, on the assumption that an

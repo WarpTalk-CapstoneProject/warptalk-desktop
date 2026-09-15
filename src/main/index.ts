@@ -726,6 +726,40 @@ async function runVirtualAudioInstaller(): Promise<{ started: boolean; reason?: 
 }
 
 /**
+ * Adds WarpTalk's audio devices on launch when this Mac does not have them yet.
+ *
+ * A fresh download installs them already: the .pkg's postinstall copies them into the HAL
+ * directory. This covers everyone who got the app another way - an auto-update from a version
+ * that shipped without them (updates install from the .zip, which runs no scripts), or a pkg
+ * install whose postinstall could not copy them. Asked once per app version, so "Not now" is
+ * respected until the next update rather than repeated on every launch.
+ */
+async function ensureBundledMacDriversInstalled(): Promise<void> {
+  if (process.platform !== "darwin" || !app.isPackaged) return;
+
+  const bundledDrivers = getDesktopAssetPath("audio-drivers");
+  const carried = MAC_BUNDLED_DRIVERS.every((bundle) =>
+    fs.existsSync(path.join(bundledDrivers, bundle)),
+  );
+  if (!carried) return;
+
+  const installed = MAC_BUNDLED_DRIVERS.every((bundle) =>
+    fs.existsSync(path.join("/Library/Audio/Plug-Ins/HAL", bundle)),
+  );
+  if (installed) return;
+
+  const askedFlag = path.join(app.getPath("userData"), `audio-drivers-offered-${app.getVersion()}`);
+  if (fs.existsSync(askedFlag)) return;
+  try {
+    fs.writeFileSync(askedFlag, new Date().toISOString());
+  } catch {
+    // Without the flag the offer may come back next launch, which is the lesser problem.
+  }
+
+  await installBundledMacDrivers(bundledDrivers);
+}
+
+/**
  * Installs WarpTalk Microphone and WarpTalk Speaker from the copies inside this app.
  *
  * The user agrees twice before anything privileged happens: once in this dialog, which says what
@@ -1121,6 +1155,7 @@ if (!app.requestSingleInstanceLock()) {
     launchWindow();
     createTray();
     initAutoUpdater();
+    void ensureBundledMacDriversInstalled();
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {
