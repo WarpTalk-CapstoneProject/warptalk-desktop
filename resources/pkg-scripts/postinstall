@@ -1,0 +1,36 @@
+#!/bin/bash
+# Runs as root at the end of the WarpTalk .pkg install (electron-builder `pkg.scripts`).
+#
+# Installs WarpTalk Microphone and WarpTalk Speaker from the copies inside the app that was just
+# installed, so a download is the whole setup: no second installer, no wizard, no second password.
+# The steps are the same ones the in-app installer runs (src/main/virtual-audio.ts,
+# buildMacDriverInstallScript) - keep the two in step.
+#
+# Never fails the install. A Mac where the devices could not be added still gets a working app,
+# and the app offers to add them on launch.
+
+APP="${2:-/Applications}/WarpTalk.app"
+SOURCE="$APP/Contents/Resources/audio-drivers"
+HAL="/Library/Audio/Plug-Ins/HAL"
+
+if [ ! -d "$SOURCE/WarpTalkMicrophone.driver" ] || [ ! -d "$SOURCE/WarpTalkSpeaker.driver" ]; then
+  echo "WarpTalk: this build carries no audio devices; skipping."
+  exit 0
+fi
+
+mkdir -p "$HAL" && chown root:wheel "$HAL" && chmod 755 "$HAL"
+
+for bundle in WarpTalkMicrophone.driver WarpTalkSpeaker.driver; do
+  target="$HAL/$bundle"
+  rm -rf "$target"
+  cp -R "$SOURCE/$bundle" "$target" || { echo "WarpTalk: could not copy $bundle"; continue; }
+  xattr -dr com.apple.quarantine "$target" 2>/dev/null || true
+  chown -R root:wheel "$target"
+  find "$target" -type d -exec chmod 755 {} +
+  find "$target" -type f -exec chmod 644 {} +
+  chmod 755 "$target"/Contents/MacOS/*
+done
+
+# Makes the devices appear now rather than after a restart.
+killall coreaudiod 2>/dev/null || true
+exit 0
