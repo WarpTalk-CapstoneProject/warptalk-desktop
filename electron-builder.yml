@@ -73,11 +73,16 @@ mac:
   # pkg's postinstall (resources/pkg-scripts/postinstall) also adds WarpTalk Microphone and
   # WarpTalk Speaker, so downloading WarpTalk is the whole setup. The zip stays - it is what
   # electron-updater installs updates from.
+  #
+  # ONE pkg arch per run. electron-builder 24 builds each pkg through an intermediate
+  # `<outDir>/com.warptalk.desktop.pkg` shared by every arch and unlinks it when done, so two archs
+  # in one run race and the whole macOS job fails (v0.4.5: ENOENT on unlink, no Intel pkg and no
+  # latest-mac.yml). The Intel pkg is built by its own step in release.yml
+  # (`--mac pkg --x64`). Both zips stay here: latest-mac.yml is written from the zips of ONE run.
   target:
     - target: pkg
       arch:
         - arm64
-        - x64
     - target: zip
       arch:
         - arm64

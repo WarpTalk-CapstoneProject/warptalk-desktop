@@ -200,3 +200,13 @@ jobs:
         env:
           # electron-builder reads this to create/update the GitHub Release named after the tag.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The Intel Mac installer, in a run of its own. Two pkg archs in one electron-builder run share
+      # an intermediate file and fail the job (see the mac target comment in the builder config).
+      # A pkg-only run writes no latest-mac.yml, so the one the step above published is kept, and
+      # the renderer bundle from that step is reused.
+      - name: Build and publish the Intel macOS installer (.pkg)
+        if: runner.os == 'macOS'
+        run: npx electron-builder --config electron-builder.remote.yml --mac pkg --x64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
