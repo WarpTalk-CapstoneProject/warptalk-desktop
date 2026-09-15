@@ -67,9 +67,14 @@ mac:
       can offer to translate it. It only reads the address of the tab you are
       looking at.
   # macos-latest runners are Apple Silicon, so building the host arch alone
-  # would ship a dmg that refuses to launch on every Intel Mac.
+  # would ship an installer that refuses to launch on every Intel Mac.
+  #
+  # .pkg, not .dmg, is what the download page hands out: a dmg can only copy the app, while the
+  # pkg's postinstall (resources/pkg-scripts/postinstall) also adds WarpTalk Microphone and
+  # WarpTalk Speaker, so downloading WarpTalk is the whole setup. The zip stays - it is what
+  # electron-updater installs updates from.
   target:
-    - target: dmg
+    - target: pkg
       arch:
         - arm64
         - x64
@@ -91,16 +96,34 @@ mac:
   # rather than before it.
   notarize: false
 
+pkg:
+  # Relative to buildResources (resources/). Must stay executable.
+  scripts: pkg-scripts
+  installLocation: /Applications
+  # Always /Applications: the postinstall looks for the app there, and a relocated install would
+  # leave it copying drivers from a path that does not exist.
+  isRelocatable: false
+  isVersionChecked: false
+  allowAnywhere: false
+  allowCurrentUserHome: false
+  overwriteAction: upgrade
+
 win:
   icon: resources/warptalk-logo-primary.ico
   target:
     - nsis
     - portable
+  # VB-CABLE and Hi-Fi Cable plus the script that installs them; the installer runs it
+  # (resources/installer.nsh). See resources/windows-audio-drivers/README.md.
+  extraResources:
+    - from: resources/windows-audio-drivers
+      to: windows-audio-drivers
 
 nsis:
   installerIcon: resources/warptalk-logo-primary.ico
   uninstallerIcon: resources/warptalk-logo-primary.ico
   shortcutName: WarpTalk
+  include: resources/installer.nsh
 
 linux:
   icon: resources/warptalk-logo-primary.png
