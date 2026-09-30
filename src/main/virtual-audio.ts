@@ -254,7 +254,9 @@ const WINDOWS_PROVIDERS: ReadonlyArray<VirtualAudioProvider> = [
    * Two things are not yet confirmed on a real Windows 10/11 machine: the exact "(VB-Audio …)"
    * suffix, which is why matching is by the stem, and the driver itself, whose download page still
    * lists Windows 8 as the newest release target. It also passes no sound unless both of its sides
-   * are set to the same sample rate, which the setup copy tells the user.
+   * share the exact same sample rate AND bit depth. The installer aligns both endpoints to 24-bit
+   * 48 kHz automatically (resources/windows-audio-drivers/install-cables.ps1); users who
+   * installed the cables manually need to align them in Windows Sound Settings.
    *
    * Not a separate recommendation: VB-CABLE stays `recommendedProviderId`, because it is the leg
    * without which nothing reaches the meeting at all. This one upgrades the inbound leg.
