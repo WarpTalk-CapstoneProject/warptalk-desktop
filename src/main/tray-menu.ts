@@ -13,6 +13,8 @@ export interface TrayMenuActions {
   showMeetingPanel: () => void;
   /** Asks electron-updater now, and always answers. See updater.ts checkForUpdatesInteractive. */
   checkForUpdates: () => void;
+  /** Installs the downloaded update (or, on a portable copy, opens the download page). */
+  installUpdate: () => void;
   quit: () => void;
 }
 
@@ -26,6 +28,11 @@ export interface TrayMenuState {
    * learned it was.
    */
   meetingPanelAvailable: boolean;
+  /**
+   * "Restart to update (x.y.z)" while a downloaded build waits, else null. First in the menu and
+   * kept there until the update is installed: the card's Later hides the card, never this.
+   */
+  updateLabel: string | null;
 }
 
 export function trayMenuTemplate(
@@ -33,7 +40,12 @@ export function trayMenuTemplate(
   state: TrayMenuState,
   actions: TrayMenuActions,
 ): MenuItemConstructorOptions[] {
+  const update: MenuItemConstructorOptions[] =
+    state.updateLabel === null
+      ? []
+      : [{ label: state.updateLabel, click: () => actions.installUpdate() }, { type: "separator" }];
   return [
+    ...update,
     {
       label: `Show ${appName}`,
       click: () => actions.showApp(),
