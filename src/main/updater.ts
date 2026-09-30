@@ -30,13 +30,14 @@
  * WHERE THE FEED COMES FROM
  *   Nowhere in this file for an installed build: both electron-builder configs carry a `publish:`
  *   github block, so the packaged app has resources/app-update.yml. scripts/check-release-contract.mjs
- *   fails CI if that block goes away. A portable copy has no app-update.yml and cannot install
- *   anything, so it is pointed at the same feed by hand and only ever told "a newer version exists".
+ *   fails CI if that block goes away. Builds that cannot install an update - portable, and macOS
+ *   and Linux until they can (WT-674) - never touch electron-updater: they read the release's
+ *   latest*.yml themselves and are only ever told "a newer version exists", with a Download button.
  *
  * Decisions live in update-policy.ts, where they are tested; this file only carries them out.
  */
 
-import { app, dialog, Notification, powerMonitor, shell, type BrowserWindow } from "electron";
+import { app, dialog, net, Notification, powerMonitor, shell, type BrowserWindow } from "electron";
 import { autoUpdater, type UpdateCheckResult } from "electron-updater";
 import path from "path";
 
@@ -47,7 +48,11 @@ import {
   RELEASES_PAGE_URL,
   dismissAfter,
   interactiveCheckDialog,
+  isNewerVersion,
   nextCheckDelay,
+  notifyOnlyFeed,
+  notifyOnlyFeedUrl,
+  parseFeedVersion,
   releaseNotesUrl,
   restartChoice,
   restartDialog,
@@ -60,6 +65,7 @@ import {
   type CardDismissal,
   type CheckReason,
   type InteractiveCheckOutcome,
+  type ManualUpdateReason,
   type UpdateCardAction,
   type UpdatePhase,
   type UpdaterGate,
@@ -84,6 +90,8 @@ let logger: UpdaterLogger | null = null;
 let gate: UpdaterGate | null = null;
 let host: UpdaterHost | null = null;
 let mode: Mode | null = null;
+/** Set in notify-only mode: which feed file to read, and why this build cannot install. */
+let notifyOnly: { why: ManualUpdateReason; file: string } | null = null;
 let interactiveCheck: Promise<void> | null = null;
 
 let phase: UpdatePhase = { kind: "idle" };
@@ -119,10 +127,21 @@ export function initAutoUpdater(appHost: UpdaterHost): void {
   host = appHost;
   const decided = currentGate();
   log().info(`${app.getName()} ${app.getVersion()} on ${process.platform}/${process.arch}`);
-  if (!decided.enabled && decided.code !== "portable") {
-    log().info(`Auto-update skipped: ${decided.reason}`);
+  if (!decided.enabled) {
+    notifyOnly = notifyOnlyFeed(decided);
+    if (!notifyOnly) {
+      log().info(`Auto-update skipped: ${decided.reason}`);
+      return;
+    }
+    // electron-updater is never touched on this path. See update-policy.ts notifyOnlyFeed.
+    mode = "notify-only";
+    log().info(`Auto-update skipped: ${decided.reason}. Checking ${notifyOnly.file} to tell the user instead.`);
+    powerMonitor.on("resume", () => triggerCheck("resume"));
+    powerMonitor.on("unlock-screen", () => triggerCheck("unlock"));
+    schedule(FIRST_CHECK_DELAY_MS);
     return;
   }
+  mode = "install";
 
   // Touched only past the gate: this getter constructs the platform updater on first access, and
   // on macOS that would be a MacUpdater no ad-hoc signed bundle can satisfy.
@@ -131,28 +150,17 @@ export function initAutoUpdater(appHost: UpdaterHost): void {
   // info closes a path nothing here uses; electron-updater warns on every download until it is set.
   autoUpdater.disableWebInstaller = true;
 
-  if (decided.enabled) {
-    mode = "install";
-  } else {
-    mode = "notify-only";
-    autoUpdater.autoDownload = false;
-    autoUpdater.autoInstallOnAppQuit = false;
-    autoUpdater.setFeedURL({ provider: "github", owner: "WarpTalk-CapstoneProject", repo: "warptalk-desktop" });
-    log().info(`Portable build: checking for new versions only (${decided.reason})`);
-  }
   log().info(
-    `Auto-update on (${mode}): autoDownload=${autoUpdater.autoDownload} autoInstallOnAppQuit=${autoUpdater.autoInstallOnAppQuit}`,
+    `Auto-update on: autoDownload=${autoUpdater.autoDownload} autoInstallOnAppQuit=${autoUpdater.autoInstallOnAppQuit}`,
   );
 
   autoUpdater.on("update-available", (info) => {
-    if (mode === "notify-only") {
-      setPhase({ kind: "manual", version: info.version });
-    } else if (phase.kind !== "ready" || phase.version !== info.version) {
+    if (phase.kind !== "ready" || phase.version !== info.version) {
       setPhase({ kind: "available", version: info.version });
     }
   });
   autoUpdater.on("update-not-available", () => {
-    if (phase.kind === "available" || phase.kind === "manual") setPhase({ kind: "idle" });
+    if (phase.kind === "available") setPhase({ kind: "idle" });
   });
   autoUpdater.on("download-progress", (progress) => {
     const version = phase.kind === "available" || phase.kind === "downloading" ? phase.version : null;
@@ -214,8 +222,41 @@ function triggerCheck(reason: CheckReason): void {
     return;
   }
   log().info(`Checking for updates (${reason})`);
+  if (mode === "notify-only") {
+    void runFeedCheck().catch(() => {});
+    return;
+  }
   // A rejection has already been delivered to the `error` listener.
   runCheck().catch(() => {});
+}
+
+/** Notify-only: read the release's feed file and compare versions. Resolves to the newer version, or null. */
+async function runFeedCheck(): Promise<string | null> {
+  if (!notifyOnly) return null;
+  checkRunning = true;
+  let failed = false;
+  try {
+    const response = await net.fetch(notifyOnlyFeedUrl(notifyOnly.file), { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status} for ${notifyOnly.file}`);
+    const latest = parseFeedVersion(await response.text());
+    if (!latest) throw new Error(`${notifyOnly.file} has no version`);
+    if (isNewerVersion(latest, app.getVersion())) {
+      log().info(`Found version ${latest}; this build cannot install it (${notifyOnly.why})`);
+      setPhase({ kind: "manual", version: latest, why: notifyOnly.why });
+      return latest;
+    }
+    log().info(`Up to date: latest is ${latest}`);
+    if (phase.kind === "manual") setPhase({ kind: "idle" });
+    return null;
+  } catch (error) {
+    failed = true;
+    log().error(`Update check failed: ${summarizeUpdateError(error)}`);
+    throw error;
+  } finally {
+    checkRunning = false;
+    lastCheckAt = Date.now();
+    schedule(nextCheckDelay(failed));
+  }
 }
 
 async function runCheck(): Promise<UpdateCheckResult | null> {
@@ -373,6 +414,20 @@ export function checkForUpdatesInteractive(): Promise<void> {
 
 async function runInteractiveCheck(): Promise<void> {
   const decided = currentGate();
+  if (mode === "notify-only" && !decided.enabled) {
+    // Ask the feed now; a newer version gets the card, anything else the gated explanation.
+    let newer: string | null = null;
+    try {
+      newer = await runFeedCheck();
+    } catch (error) {
+      return showOutcome({ kind: "failed", error: summarizeUpdateError(error) });
+    }
+    if (newer) {
+      showCard();
+      return;
+    }
+    return showOutcome({ kind: "up-to-date", currentVersion: app.getVersion() });
+  }
   if (!decided.enabled) {
     log().info(`Check for Updates skipped: ${decided.reason}`);
     return showOutcome({ kind: "gated", gate: decided });
