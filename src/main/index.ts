@@ -45,11 +45,16 @@ import {
   MAC_BUNDLED_DRIVERS,
   VBCABLE_DOWNLOAD_PAGE,
   buildMacDriverInstallScript,
-  detectVirtualAudio,
+  detectVirtualAudioWithFormats,
   hasHomebrew,
   toAppleScriptAdminCommand,
 } from "./virtual-audio";
 import { WebRuntimeService } from "./web-runtime";
+import {
+  alignHiFiCableFormat,
+  isHiFiFormatMismatch,
+  readHiFiCableFormats,
+} from "./audio-device-format";
 import {
   PLUGIN_CONNECT_SCHEME,
   firstPluginConnectLink,
@@ -191,9 +196,14 @@ function registerIpcHandlers(): void {
   // tier picker reads exactly this field to decide whether the loopback rung is on offer.
   ipcMain.handle("bridge:virtual-audio-status", async () => {
     await windowsLoopbackRuntime.whenProbed();
-    return detectVirtualAudio(windowsLoopbackRuntime.isReady());
+    return detectVirtualAudioWithFormats(windowsLoopbackRuntime.isReady());
   });
   ipcMain.handle("bridge:install-virtual-audio", () => runVirtualAudioInstaller());
+  ipcMain.handle("bridge:align-hifi-format", async () => {
+    const result = await alignHiFiCableFormat();
+    console.log("Hi-Fi Cable format alignment:", JSON.stringify(result));
+    return result;
+  });
   ipcMain.handle("bridge:open-transcript-window", async (_event, roomId: string | null) => {
     transcriptPanel.request(roomId ?? null);
     refreshTrayMenu();
@@ -646,6 +656,26 @@ async function openTranscriptWindow(
 }
 
 /**
+ * Aligns Hi-Fi Cable once at startup, when its two sides disagree and the inbound leg is silent.
+ *
+ * Only on a detected mismatch: a machine whose sides already agree, even at another rate, passes
+ * sound and is left as the user set it. In the background, because it spawns PowerShell more than
+ * once and nothing at startup should wait on that. See audio-device-format.ts for why this is not
+ * left to the installer.
+ */
+async function alignHiFiCableFormatIfMismatched(): Promise<void> {
+  try {
+    const formats = await readHiFiCableFormats();
+    if (!isHiFiFormatMismatch(formats)) return;
+    const result = await alignHiFiCableFormat();
+    if (result.ok) console.log("Aligned the Hi-Fi Cable endpoint formats:", JSON.stringify(result));
+    else console.warn("Could not align the Hi-Fi Cable endpoint formats:", JSON.stringify(result));
+  } catch (error) {
+    console.warn("Could not check the Hi-Fi Cable endpoint formats:", error);
+  }
+}
+
+/**
  * Hands the bundled virtual-audio installer to the OS installer UI.
  *
  * Deliberately not silent. It writes into /Library and needs an administrator, so the user is told
@@ -662,8 +692,10 @@ async function runVirtualAudioInstaller(): Promise<{ started: boolean; reason?: 
         "carries your translated voice into the meeting, and Hi-Fi Cable carries the meeting back " +
         "to WarpTalk. Install both and restart if an installer asks.\n\n" +
         "Then, in Google Meet's audio settings, choose CABLE Output as the microphone and Hi-Fi " +
-        "Cable Input as the speaker. In Windows Sound settings, set Hi-Fi Cable Input and Hi-Fi " +
-        "Cable Output to the same format, 48000 Hz — it passes no sound when they differ.\n\n" +
+        "Cable Input as the speaker. WarpTalk sets both Hi-Fi Cable endpoints to the same format " +
+        "when it starts; if the meeting stays silent, open Windows Sound settings and set BOTH Hi-Fi " +
+        "Cable Input and Hi-Fi Cable Output to 24 bit, 48000 Hz. The cable passes no sound when " +
+        "their sample rate or bit depth differ.\n\n" +
         "Without Hi-Fi Cable, WarpTalk still works but listens to your whole browser, so sound " +
         "from other tabs is translated too.\n\n" +
         "WarpTalk does not install a driver silently or change your Windows default audio device.",
@@ -1156,6 +1188,7 @@ if (!app.requestSingleInstanceLock()) {
     createTray();
     initAutoUpdater();
     void ensureBundledMacDriversInstalled();
+    if (process.platform === "win32") void alignHiFiCableFormatIfMismatched();
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {

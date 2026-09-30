@@ -26,7 +26,8 @@
     "lint": "eslint src/ --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
     "test:main": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test \"src/main/__tests__/*.test.js\"",
-    "test:virtual-audio": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test src/main/__tests__/virtual-audio.test.js src/main/__tests__/windows-loopback-runtime.test.js src/main/__tests__/windows-loopback-sources.test.js src/main/__tests__/meet-presence.test.js",
+    "test:virtual-audio": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test src/main/__tests__/virtual-audio.test.js src/main/__tests__/windows-loopback-runtime.test.js src/main/__tests__/windows-loopback-sources.test.js src/main/__tests__/meet-presence.test.js src/main/__tests__/audio-device-format.test.js",
+    "test:audio-device-format": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test src/main/__tests__/audio-device-format.test.js",
     "check:mac-signing": "node scripts/check-mac-signing-contract.mjs",
     "check:release": "node scripts/check-release-contract.mjs"
   },
