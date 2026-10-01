@@ -52,23 +52,26 @@ test("arming answers immediately instead of waiting out the first interval", asy
   watcher.disarm();
 });
 
-test("the offer reads the code of the call on screen, and nothing once it is gone", async (t) => {
+test("a call that leaves the screen is reported without its code", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
+  const observed = [];
   const windows = fakeWindows(seen("jkq-yaax-phw"));
-  const watcher = new MeetPresenceWatcher({ readMeetSighting: windows.read, onChange: () => {} });
+  const watcher = new MeetPresenceWatcher({
+    readMeetSighting: windows.read,
+    onChange: (presence) => observed.push(presence),
+  });
 
-  assert.equal(watcher.meetCode, null, "nothing has been seen before the first look");
   watcher.arm();
   await flush();
-  assert.equal(watcher.meetCode, "jkq-yaax-phw");
+  assert.equal(observed.at(-1).meetCode, "jkq-yaax-phw");
 
   windows.state.sighting = null;
   t.mock.timers.tick(3000);
   await flush();
-  assert.equal(watcher.meetCode, null, "a call that left the screen must not name the next offer's room");
+  assert.equal(observed.at(-1).meetWindowVisible, false);
+  assert.equal(observed.at(-1).meetCode, undefined, "a call that is gone must not name the next one");
 
   watcher.disarm();
-  assert.equal(watcher.meetCode, null);
 });
 
 test("a disarmed watcher never enumerates", async (t) => {
