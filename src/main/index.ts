@@ -33,7 +33,15 @@ import { MacMeetUrlSensor } from "./meet-url-sensor-mac";
 import { TranscriptPanelLedger } from "./transcript-panel";
 import { trayMenuTemplate } from "./tray-menu";
 import { shouldHideOnClose, shouldIgnoreBeforeUnload } from "./quit-lifecycle";
-import { checkForUpdatesInteractive, initAutoUpdater } from "./updater";
+import {
+  checkForUpdatesInteractive,
+  getUpdatePhase,
+  initAutoUpdater,
+  installUpdate,
+  onMainWindowShown,
+} from "./updater";
+import { trayBadged, trayTooltip, trayUpdateLabel } from "./update-policy";
+import { withUpdateDot } from "./tray-badge";
 import type { MeetPresence } from "../shared/types";
 import {
   describeWindowsLoopbackSources,
@@ -65,6 +73,11 @@ let mainWindow: BrowserWindow | null = null;
 /** The bridge popup, and what the web app asked it to show. See transcript-panel.ts. */
 const transcriptPanel = new TranscriptPanelLedger<BrowserWindow>();
 let tray: Tray | null = null;
+/** The tray icon as loaded, and with the "update waiting" dot. See tray-badge.ts. */
+let trayIcon: Electron.NativeImage | null = null;
+let trayIconBadged: Electron.NativeImage | null = null;
+/** Whether the renderer has a loopback capture running, i.e. a bridge meeting is being translated. */
+let loopbackCapturing = false;
 /** Set once the app has decided to quit, before any window is asked to close. See quit-lifecycle.ts. */
 let isQuitting = false;
 /**
@@ -148,10 +161,15 @@ function registerIpcHandlers(): void {
   ipcMain.handle("app:open-external", async (_event, url: string) => {
     openExternalUrl(url);
   });
-  ipcMain.handle("audio:start-capture", async (_event, request) =>
-    windowsLoopbackRuntime.start(request),
-  );
-  ipcMain.handle("audio:stop-capture", async () => windowsLoopbackRuntime.stop());
+  ipcMain.handle("audio:start-capture", async (_event, request) => {
+    const result = await windowsLoopbackRuntime.start(request);
+    loopbackCapturing = result.started;
+    return result;
+  });
+  ipcMain.handle("audio:stop-capture", async () => {
+    loopbackCapturing = false;
+    return windowsLoopbackRuntime.stop();
+  });
   // Arm/disarm rather than a query: the renderer would otherwise have to poll main, which polls
   // the OS, and two loops out of step is how a widget ends up a few seconds behind the meeting.
   ipcMain.handle("bridge:watch-meet-presence", () => {
@@ -324,6 +342,11 @@ async function createWindow(): Promise<void> {
       mainWindow = null;
     }
   });
+
+  // The update card lives on this window, and a window brought back from the tray is a good moment
+  // to check again if the last check is stale. See updater.ts.
+  win.on("show", () => onMainWindowShown());
+  win.webContents.once("did-finish-load", () => onMainWindowShown());
 
   // Minimize to tray instead of closing - except while quitting, when cancelling the close would
   // cancel the quit. See quit-lifecycle.ts.
@@ -930,6 +953,12 @@ function createTray(): void {
     icon = icon.resize({ width: 32, height: 32 });
   }
 
+  trayIcon = icon;
+  if (process.platform === "win32") {
+    const { width, height } = icon.getSize();
+    const badged = nativeImage.createFromBitmap(withUpdateDot(icon.toBitmap(), width, height), { width, height });
+    trayIconBadged = badged.isEmpty() ? null : badged;
+  }
   tray = new Tray(icon);
   tray.setToolTip(APP_NAME);
   refreshTrayMenu();
@@ -950,11 +979,15 @@ function refreshTrayMenu(): void {
     Menu.buildFromTemplate(
       trayMenuTemplate(
         APP_NAME,
-        { meetingPanelAvailable: transcriptPanel.reopenTarget !== null },
+        {
+          meetingPanelAvailable: transcriptPanel.reopenTarget !== null,
+          updateLabel: trayUpdateLabel(getUpdatePhase()),
+        },
         {
           showApp: () => mainWindow?.show(),
           showMeetingPanel: () => void reopenTranscriptWindow(),
           checkForUpdates: () => void checkForUpdatesInteractive(),
+          installUpdate: () => installUpdate(),
           quit: () => app.quit(),
         },
       ),
@@ -1140,6 +1173,31 @@ function registerPluginConnectScheme(): void {
   app.setAsDefaultProtocolClient(PLUGIN_CONNECT_SCHEME);
 }
 
+/**
+ * Whether installing an update now would cut a meeting short, so the update card asks first. Main
+ * cannot see the web app's call state; these are the signs it has.
+ */
+function isMeetingActive(): boolean {
+  const popup = transcriptPanel.window;
+  if (popup && !popup.isDestroyed()) return true;
+  if (loopbackCapturing) return true;
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return false;
+  try {
+    return /\/rooms\/[^/]+\/live(\/|$|\?)/.test(new URL(win.webContents.getURL()).pathname);
+  } catch {
+    return false;
+  }
+}
+
+function refreshTrayForUpdate(): void {
+  refreshTrayMenu();
+  if (!tray || !trayIcon) return;
+  const phase = getUpdatePhase();
+  tray.setToolTip(trayTooltip(APP_NAME, phase));
+  tray.setImage(trayBadged(phase) && trayIconBadged ? trayIconBadged : trayIcon);
+}
+
 function revealMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) {
     launchWindow();
@@ -1188,7 +1246,13 @@ if (!app.requestSingleInstanceLock()) {
 
     launchWindow();
     createTray();
-    initAutoUpdater();
+    initAutoUpdater({
+      getMainWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+      revealMainWindow,
+      isMeetingActive,
+      onPhaseChange: refreshTrayForUpdate,
+      iconPath: getDesktopAssetPath(APP_ICON_FILE),
+    });
     void ensureBundledMacDriversInstalled();
     if (process.platform === "win32") void alignHiFiCableFormatIfMismatched();
 
