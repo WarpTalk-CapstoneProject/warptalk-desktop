@@ -25,13 +25,12 @@
  */
 
 export interface TranscriptPanelTarget {
-  /** Null for the offer, which has no room yet. */
-  roomId: string | null;
+  roomId: string;
 }
 
 export class TranscriptPanelLedger<W> {
   private requestedTarget: TranscriptPanelTarget | null = null;
-  private current: { window: W; roomId: string | null } | null = null;
+  private current: { window: W; roomId: string } | null = null;
 
   /** The popup on screen, or null. May be destroyed; callers check, as they always have. */
   get window(): W | null {
@@ -44,12 +43,12 @@ export class TranscriptPanelLedger<W> {
   }
 
   /** The web app asked for the popup to show `roomId`. */
-  request(roomId: string | null): void {
+  request(roomId: string): void {
     this.requestedTarget = { roomId };
   }
 
   /** `window` is now showing `roomId` - a new popup, or an existing one navigated to it. */
-  shown(window: W, roomId: string | null): void {
+  shown(window: W, roomId: string): void {
     this.current = { window, roomId };
   }
 

@@ -21,12 +21,11 @@
  *   accessibility wake-up in the browser rather than anything per read, and the delta vanished
  *   across six paired idle/polling rounds.
  *
- *   It runs for the whole session on the desktop, for every user, including those who never open
- *   a bridge meeting. That is deliberate and it is the price of the feature: the sensor used to
- *   arm only where a bridge room already existed, which meant the very first bridge meeting a
- *   workspace ever had could never be offered — the one case the offer exists for. If that price
- *   should be optional, the gate belongs in a user preference, not in an accident of which rooms
- *   happen to exist.
+ *   It runs for the whole signed-in session on the desktop, for every user, including those who
+ *   never open a bridge meeting: the web app's bridge trigger arms it whenever the app shell is
+ *   up. Signed out, main arms it itself, only to offer a sign-in (signed-out-meet-prompt.ts). If
+ *   that price should be optional, the gate belongs in a user preference, not in an accident of
+ *   which rooms happen to exist.
  */
 
 import type { MeetPresence } from "../shared/types.ts";
@@ -74,17 +73,6 @@ export class MeetPresenceWatcher {
   /** The browser process the last sighting belonged to, for aiming capture. Main-process only. */
   get meetProcessId(): number | null {
     return this.lastProcessId;
-  }
-
-  /**
-   * The Meet room code of the call on screen, when the last sighting carried one.
-   *
-   * Read by the offer window, so the room it creates can store the call's own link: without it an
-   * impromptu bridge room could never be told apart from another Meet call, and the schedule never
-   * showed it as a Google Meet meeting.
-   */
-  get meetCode(): string | null {
-    return this.last?.meetWindowVisible ? (this.last.meetCode ?? null) : null;
   }
 
   /** Idempotent: arming an armed watcher keeps the one interval it already has. */

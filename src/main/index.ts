@@ -31,6 +31,7 @@ import { MeetPresenceWatcher } from "./meet-presence";
 import { MeetUrlSensor } from "./meet-url-sensor";
 import { MacMeetUrlSensor } from "./meet-url-sensor-mac";
 import { TranscriptPanelLedger } from "./transcript-panel";
+import { SignedOutMeetPrompt } from "./signed-out-meet-prompt";
 import { trayMenuTemplate } from "./tray-menu";
 import { shouldHideOnClose, shouldIgnoreBeforeUnload } from "./quit-lifecycle";
 import {
@@ -92,9 +93,10 @@ const audioRuntime = new AudioRuntimeService();
  * Watches for a Google Meet window so the bridge widget can appear when the user is actually in
  * the call, rather than when they happen to open the room in WarpTalk.
  *
- * Armed by the renderer and only by the renderer: enumerating every window on the machine is not
- * something to do on the chance a meeting might start. The renderer knows when a bridge meeting is
- * near; main does not, and giving main that knowledge would mean giving it the API session too.
+ * Armed by the renderer's bridge trigger, which knows when a bridge meeting is near; main does not,
+ * and giving main that knowledge would mean giving it the API session too. The one exception is a
+ * signed-out app, where that trigger never mounts: main then arms it itself, only to offer a
+ * sign-in. See signed-out-meet-prompt.ts.
  *
  * The sensor reads the browser's own URL rather than the window title. A title is written by the
  * page and so is worthless as a trust boundary; an address is not. See meet-url-sensor.ts.
@@ -113,7 +115,19 @@ const meetPresenceWatcher = new MeetPresenceWatcher({
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("bridge:meet-presence", presence);
     }
+    signedOutMeetPrompt.presence(presence);
   },
+});
+
+/** Main's own use of the watcher while nobody is signed in. See signed-out-meet-prompt.ts. */
+const signedOutMeetPrompt = new SignedOutMeetPrompt({
+  armWatcher: () => meetPresenceWatcher.arm(),
+  disarmWatcher: () => {
+    meetPresenceWatcher.disarm();
+    // Same as the web app's disarm: the helper shell would otherwise outlive the watch.
+    meetUrlSensor.stop();
+  },
+  notify: () => announceSignInForMeet(),
 });
 const windowsLoopbackRuntime = new WindowsLoopbackRuntime(
   createNativeWindowsLoopbackAdapter({
@@ -174,12 +188,21 @@ function registerIpcHandlers(): void {
   // the OS, and two loops out of step is how a widget ends up a few seconds behind the meeting.
   ipcMain.handle("bridge:watch-meet-presence", () => {
     meetPresenceWatcher.arm();
+    signedOutMeetPrompt.webArmedWatcher();
   });
   ipcMain.handle("bridge:unwatch-meet-presence", () => {
     meetPresenceWatcher.disarm();
     // The helper is one long-lived shell. Disarming without killing it would leave a PowerShell
     // process alive for the rest of the session, polling nothing.
     meetUrlSensor.stop();
+    signedOutMeetPrompt.webDisarmedWatcher();
+  });
+  // Whether anyone is signed in to the web app. Optional on the web side: a web app that never
+  // sends it is "unknown", which prompts only after the grace period passes without an arm.
+  ipcMain.handle("auth:signed-in-state", (_event, state: unknown) => {
+    const signedIn = (state as { signedIn?: unknown } | null)?.signedIn;
+    if (typeof signedIn !== "boolean") return;
+    signedOutMeetPrompt.reportSignedIn(signedIn);
   });
   ipcMain.handle("audio:list-loopback-sources", async () => {
     if (process.platform !== "win32") return [];
@@ -224,13 +247,16 @@ function registerIpcHandlers(): void {
     console.log("Hi-Fi Cable format alignment:", JSON.stringify(result));
     return result;
   });
-  ipcMain.handle("bridge:open-transcript-window", async (_event, roomId: string | null) => {
-    transcriptPanel.request(roomId ?? null);
+  ipcMain.handle("bridge:open-transcript-window", async (_event, roomId: unknown) => {
+    // Only a real room has a popup. The roomless "offer" it once also opened is gone from the web
+    // app (web #505); a stale caller asking for it gets nothing rather than a 404 in a window.
+    if (typeof roomId !== "string" || roomId.length === 0) return;
+    transcriptPanel.request(roomId);
     refreshTrayMenu();
-    await openTranscriptWindow(roomId ?? null);
+    await openTranscriptWindow(roomId);
   });
   /**
-   * Flow 2's last mile: the offer window has made a room, and the SESSION has to start.
+   * The popup asks for the room's session to start.
    *
    * It cannot start it itself. The translation pipeline lives in the main window's meeting
    * session, keyed off a store held in sessionStorage - which is per-window, so nothing the
@@ -247,6 +273,17 @@ function registerIpcHandlers(): void {
     const win = transcriptPanel.withdraw();
     refreshTrayMenu();
     if (win && !win.isDestroyed()) win.close();
+  });
+  /**
+   * Brings the main window forward - from the tray, minimized, or behind the browser.
+   *
+   * The popup has no End meeting: a bridge meeting ends when the Google Meet call does. When the
+   * web app learns the room ended it navigates the main window to the room itself and calls this,
+   * so the user lands on the record as they would after a native meeting. The popup is left alone;
+   * what it shows next is the web app's call.
+   */
+  ipcMain.handle("bridge:show-main-window", () => {
+    revealMainWindow();
   });
 
   ipcMain.on("window:minimize", () => mainWindow?.minimize());
@@ -347,6 +384,14 @@ async function createWindow(): Promise<void> {
   // to check again if the last check is stale. See updater.ts.
   win.on("show", () => onMainWindowShown());
   win.webContents.once("did-finish-load", () => onMainWindowShown());
+
+  // The signed-out prompt's view of the page: a full load starts over, and the grace period for the
+  // web app to arm the sensor runs from the end of each load. Same-document navigations are the
+  // SPA moving around and change nothing.
+  win.webContents.on("did-start-navigation", (details) => {
+    if (details.isMainFrame && !details.isSameDocument) signedOutMeetPrompt.pageLoadStarted();
+  });
+  win.webContents.on("did-finish-load", () => signedOutMeetPrompt.pageLoaded());
 
   // Minimize to tray instead of closing - except while quitting, when cancelling the close would
   // cancel the quit. See quit-lifecycle.ts.
@@ -464,8 +509,6 @@ async function createWindow(): Promise<void> {
 
 /** The compact transcript view the popup shows. Served by the web app, not by the local renderer. */
 const TRANSCRIPT_ROUTE = "/desktop-transcript";
-/** Flow 2: a Meet is on screen that no room accounts for. The window asks before anything is made. */
-const BRIDGE_OFFER_ROUTE = "/desktop-bridge-offer";
 
 /**
  * A second, small, always-on-top window carrying the live transcript.
@@ -490,14 +533,12 @@ const BRIDGE_OFFER_ROUTE = "/desktop-bridge-offer";
  * do nothing then, which is the dead end again. It brings back what the web app wants shown NOW
  * rather than what this notification announced, which may be twenty minutes and one meeting old.
  */
-function announceBridgeWindow(invited: boolean): void {
+function announceBridgeWindow(): void {
   if (!Notification.isSupported()) return;
 
   const notification = new Notification({
-    title: invited ? "Your translated meeting is ready" : `${APP_NAME} can translate this call`,
-    body: invited
-      ? "The transcript window is open beside your meeting."
-      : "You look like you are in a Google Meet. Open the panel to start translating it.",
+    title: "Your translated meeting is ready",
+    body: "The transcript window is open beside your meeting.",
     icon: getDesktopAssetPath(APP_ICON_FILE),
   });
 
@@ -522,6 +563,32 @@ function announceBridgeWindow(invited: boolean): void {
 }
 
 /**
+ * The signed-out prompt: the user is in a Google Meet call and nobody is signed in to WarpTalk.
+ *
+ * A notification and nothing more - no window raised, nothing focused. Clicking it shows the main
+ * window, which is sitting on the login page; signing in is what arms the real bridge trigger.
+ *
+ * Held in a variable: on Windows a Notification that is garbage-collected loses its click handler.
+ */
+let signInNotification: Notification | null = null;
+
+function announceSignInForMeet(): void {
+  if (!Notification.isSupported()) return;
+
+  const notification = new Notification({
+    title: "Translate this Google Meet call?",
+    body: `Sign in to ${APP_NAME} to translate it and appear with your name.`,
+    icon: getDesktopAssetPath(APP_ICON_FILE),
+  });
+  notification.on("click", () => revealMainWindow());
+  notification.on("close", () => {
+    if (signInNotification === notification) signInNotification = null;
+  });
+  signInNotification = notification;
+  notification.show();
+}
+
+/**
  * Brings back the popup the user closed, on their say-so: the tray item, or a notification.
  *
  * Not announced - the user is the one who asked - and reported to the web app, whose trigger has
@@ -536,43 +603,27 @@ async function reopenTranscriptWindow(): Promise<void> {
   }
 }
 
-/**
- * `roomId` is null for the offer — "you look like you are in a Meet, want to translate it?" — and
- * set once a real room owns the window. That distinction decides how forcefully the window may
- * behave, because only one of the two is backed by something the user arranged.
- */
+/** Opens the popup on `roomId`'s transcript, or moves the open one there. */
 async function openTranscriptWindow(
-  roomId: string | null,
+  roomId: string,
   { announce = true }: { announce?: boolean } = {},
 ): Promise<void> {
-  const invited = roomId !== null;
-
   if (!resolvedWebOrigin) {
     console.error("Cannot open the transcript window before the web UI has loaded.");
     return;
   }
 
-  // The offer carries the call's room code when the sensor read one, so the room it creates stores
-  // the Meet link and shows as a Google Meet meeting. The code is the sensor's own reading of the
-  // browser address, never something the page could have written.
-  const offerMeetCode = meetPresenceWatcher.meetCode;
-  const target = roomId
-    ? `${resolvedWebOrigin}${TRANSCRIPT_ROUTE}/${encodeURIComponent(roomId)}`
-    : `${resolvedWebOrigin}${BRIDGE_OFFER_ROUTE}${
-        offerMeetCode ? `?meetCode=${encodeURIComponent(offerMeetCode)}` : ""
-      }`;
+  const target = `${resolvedWebOrigin}${TRANSCRIPT_ROUTE}/${encodeURIComponent(roomId)}`;
 
   const existing = transcriptPanel.window;
   if (existing && !existing.isDestroyed()) {
     if (existing.isMinimized()) existing.restore();
     existing.show();
     existing.focus();
-    if (announce) announceBridgeWindow(invited);
+    if (announce) announceBridgeWindow();
     transcriptPanel.shown(existing, roomId);
-    // Reusing the window is not the same as leaving it where it was. The offer becomes a
-    // transcript the moment the user accepts, and this used to return early on the strength of a
-    // window merely existing - so the accepted offer stayed on screen, showing the question it had
-    // already been answered.
+    // Reusing the window is not the same as leaving it where it was: the web app moving from one
+    // room to the next must not leave the popup showing the previous room's transcript.
     if (existing.webContents.getURL() !== target) {
       try {
         await existing.loadURL(target);
@@ -591,14 +642,8 @@ async function openTranscriptWindow(
     title: WINDOW_TITLE,
     /**
      * The window is meant to interrupt: it takes focus and announces itself, because a translated
-     * meeting the user does not notice starting is a meeting they will think is broken.
-     *
-     * Known cost, recorded rather than hidden. The `offer` state is reachable from a window title
-     * alone, and a window title is not ours — Chrome names its window after `document.title`, so
-     * any page in any tab can put "Google Meet" there. Interrupting on that signal means any web
-     * page can raise this window and fire a notification, repeatedly. Matching harder cannot fix a
-     * string written by the party the check guards against; only a signal the page does not
-     * control can.
+     * meeting the user does not notice starting is a meeting they will think is broken. It opens
+     * only for a real room the web app asked for, never on a sensor reading alone.
      */
     alwaysOnTop: true,
     show: false,
@@ -625,7 +670,7 @@ async function openTranscriptWindow(
     if (win.isDestroyed()) return;
     win.show();
     win.focus();
-    if (announce) announceBridgeWindow(invited);
+    if (announce) announceBridgeWindow();
   });
 
   /**
@@ -1270,6 +1315,7 @@ if (!app.requestSingleInstanceLock()) {
     // Child processes this app started do not die with it on their own. The audit found the
     // loopback capture surviving both a renderer crash and quit; the URL sensor is a second such
     // child and is stopped here rather than repeating that.
+    signedOutMeetPrompt.dispose();
     meetPresenceWatcher.disarm();
     meetUrlSensor.stop();
     void windowsLoopbackRuntime.stop();
