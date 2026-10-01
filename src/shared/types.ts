@@ -24,17 +24,29 @@ export interface WarpTalkAPI {
    * that predate it, so callers must check for it before calling.
    */
   alignHiFiCableFormat?: () => Promise<HiFiFormatAlignResult>;
-  openTranscriptWindow: (roomId: string | null) => Promise<void>;
+  openTranscriptWindow: (roomId: string) => Promise<void>;
   activateRoom: (roomId: string) => Promise<void>;
   onRoomActivated: (callback: (roomId: string) => void) => () => void;
   closeTranscriptWindow: () => Promise<void>;
-  /** The user closed the popup; `roomId` is what it showed, null for the offer. */
-  onTranscriptWindowClosed: (callback: (roomId: string | null) => void) => () => void;
+  /**
+   * Restores, shows and focuses the main window (from the tray or minimized too) without touching
+   * the bridge popup. Used when a bridge room ends: the web app navigates the main window to
+   * `/rooms/{id}` and calls this. Absent on desktop builds that predate it.
+   */
+  showMainWindow?: () => Promise<void>;
+  /** The user closed the popup; `roomId` is the room it showed. */
+  onTranscriptWindowClosed: (callback: (roomId: string) => void) => () => void;
   /** The app reopened the popup itself, from the tray or a notification. */
-  onTranscriptWindowReopened: (callback: (roomId: string | null) => void) => () => void;
+  onTranscriptWindowReopened: (callback: (roomId: string) => void) => () => void;
   watchMeetPresence: () => Promise<void>;
   unwatchMeetPresence: () => Promise<void>;
   onMeetPresence: (callback: (presence: MeetPresence) => void) => () => void;
+  /**
+   * Tells main whether anyone is signed in, so a signed-out app can offer a sign-in when the user
+   * is in a Google Meet call. Optional: never calling it leaves the state "unknown". Absent on
+   * desktop builds that predate it.
+   */
+  reportSignedIn?: (signedIn: boolean) => Promise<void>;
   minimize: () => void;
   maximize: () => void;
   close: () => void;

@@ -19,14 +19,6 @@ test("a popup the user closes is reported, with what it was showing", () => {
   assert.equal(ledger.window, null);
 });
 
-test("the offer is reported as a null room, not as nothing", () => {
-  const ledger = new TranscriptPanelLedger();
-  const win = popup("offer");
-  ledger.request(null);
-  ledger.shown(win, null);
-  assert.deepEqual(ledger.closed(win), { roomId: null });
-});
-
 test("a close the web app asked for is not echoed back as the user's", () => {
   const ledger = new TranscriptPanelLedger();
   const win = popup("a");
@@ -56,9 +48,9 @@ test("an old window's close cannot clear the popup that replaced it", () => {
 test("a navigated popup reports where it ended up", () => {
   const ledger = new TranscriptPanelLedger();
   const win = popup("a");
-  ledger.request(null);
-  ledger.shown(win, null);
-  // The offer was accepted: the same window now shows the room.
+  ledger.request("room-6");
+  ledger.shown(win, "room-6");
+  // The web app moved on to the next room: the same window now shows it.
   ledger.request("room-7");
   ledger.shown(win, "room-7");
   assert.deepEqual(ledger.closed(win), { roomId: "room-7" });

@@ -57,7 +57,7 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.invoke("bridge:install-virtual-audio"),
   alignHiFiCableFormat: (): Promise<HiFiFormatAlignResult> =>
     ipcRenderer.invoke("bridge:align-hifi-format"),
-  openTranscriptWindow: (roomId: string | null): Promise<void> =>
+  openTranscriptWindow: (roomId: string): Promise<void> =>
     ipcRenderer.invoke("bridge:open-transcript-window", roomId),
   activateRoom: (roomId: string): Promise<void> =>
     ipcRenderer.invoke("bridge:activate-room", roomId),
@@ -68,15 +68,18 @@ contextBridge.exposeInMainWorld("warptalk", {
   },
   closeTranscriptWindow: (): Promise<void> =>
     ipcRenderer.invoke("bridge:close-transcript-window"),
+  // Brings the main window forward (tray, minimized, behind the browser). The popup stays open.
+  showMainWindow: (): Promise<void> =>
+    ipcRenderer.invoke("bridge:show-main-window"),
   // The user closed the popup. Never sent for a close the web app asked for.
-  onTranscriptWindowClosed: (callback: (roomId: string | null) => void): (() => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, roomId: string | null) => callback(roomId);
+  onTranscriptWindowClosed: (callback: (roomId: string) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, roomId: string) => callback(roomId);
     ipcRenderer.on("bridge:transcript-window-closed", listener);
     return () => ipcRenderer.off("bridge:transcript-window-closed", listener);
   },
   // The app brought the popup back itself - the tray item, or a notification click.
-  onTranscriptWindowReopened: (callback: (roomId: string | null) => void): (() => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, roomId: string | null) => callback(roomId);
+  onTranscriptWindowReopened: (callback: (roomId: string) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, roomId: string) => callback(roomId);
     ipcRenderer.on("bridge:transcript-window-reopened", listener);
     return () => ipcRenderer.off("bridge:transcript-window-reopened", listener);
   },
@@ -89,6 +92,10 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.on("bridge:meet-presence", listener);
     return () => ipcRenderer.off("bridge:meet-presence", listener);
   },
+
+  // Optional on the web side. Never reporting leaves the session "unknown" to main.
+  reportSignedIn: (signedIn: boolean): Promise<void> =>
+    ipcRenderer.invoke("auth:signed-in-state", { signedIn }),
 
   minimize: (): void => ipcRenderer.send("window:minimize"),
   maximize: (): void => ipcRenderer.send("window:maximize"),
