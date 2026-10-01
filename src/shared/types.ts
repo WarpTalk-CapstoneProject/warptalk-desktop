@@ -19,6 +19,11 @@ export interface WarpTalkAPI {
   openExternal: (url: string) => Promise<void>;
   getVirtualAudioStatus: () => Promise<VirtualAudioStatus>;
   installVirtualAudio: () => Promise<VirtualAudioInstallResult>;
+  /**
+   * Sets both Hi-Fi Cable endpoints to 2ch 24-bit 48 kHz. Windows only; absent on desktop builds
+   * that predate it, so callers must check for it before calling.
+   */
+  alignHiFiCableFormat?: () => Promise<HiFiFormatAlignResult>;
   openTranscriptWindow: (roomId: string | null) => Promise<void>;
   activateRoom: (roomId: string) => Promise<void>;
   onRoomActivated: (callback: (roomId: string) => void) => () => void;
@@ -70,6 +75,31 @@ export interface VirtualAudioStatus {
   riskControls?: VirtualAudioRiskControl[];
   /** Virtual drivers belonging to other applications, surfaced for support rather than used. */
   foreignDrivers: string[];
+  /** Hi-Fi Cable's two shared-mode formats. Windows only, when the cable is present and readable. */
+  hifiFormat?: HiFiCableFormats;
+  /** The two sides differ in sample rate or bit depth, so the inbound cable passes no sound. */
+  hifiFormatMismatch?: boolean;
+}
+
+export interface EndpointFormat {
+  sampleRate: number;
+  bitsPerSample: number;
+  channels: number;
+}
+
+export interface HiFiCableFormats {
+  /** "Hi-Fi Cable Input", the render endpoint Meet plays into. */
+  input: EndpointFormat | null;
+  /** "Hi-Fi Cable Output", the capture endpoint WarpTalk records. */
+  output: EndpointFormat | null;
+}
+
+export interface HiFiFormatAlignResult {
+  /** True only when the read-back shows both endpoints at 48000 Hz/24-bit. */
+  ok: boolean;
+  before: HiFiCableFormats;
+  after: HiFiCableFormats;
+  error?: string;
 }
 
 export interface VirtualAudioRiskControl {

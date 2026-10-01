@@ -8,6 +8,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 import type {
   DesktopRuntimeCapability,
+  HiFiFormatAlignResult,
   MeetPresence,
   WindowsLoopbackPcmChunk,
   VirtualAudioInstallResult,
@@ -54,6 +55,8 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.invoke("bridge:virtual-audio-status"),
   installVirtualAudio: (): Promise<VirtualAudioInstallResult> =>
     ipcRenderer.invoke("bridge:install-virtual-audio"),
+  alignHiFiCableFormat: (): Promise<HiFiFormatAlignResult> =>
+    ipcRenderer.invoke("bridge:align-hifi-format"),
   openTranscriptWindow: (roomId: string | null): Promise<void> =>
     ipcRenderer.invoke("bridge:open-transcript-window", roomId),
   activateRoom: (roomId: string): Promise<void> =>

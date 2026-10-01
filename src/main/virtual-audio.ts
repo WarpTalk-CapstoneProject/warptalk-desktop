@@ -23,6 +23,12 @@ import fs from "fs";
 import { spawnSync } from "child_process";
 import os from "os";
 
+import {
+  isHiFiFormatMismatch,
+  readHiFiCableFormatsCached,
+  type HiFiCableFormats,
+} from "./audio-device-format.ts";
+
 /** Where macOS looks for audio HAL plug-ins. */
 const MAC_HAL_DIRECTORY = "/Library/Audio/Plug-Ins/HAL";
 
@@ -64,6 +70,13 @@ export interface VirtualAudioStatus {
    * a user says when asked to install one, and naming theirs is how support conversations end.
    */
   foreignDrivers: string[];
+  /**
+   * Both Hi-Fi Cable endpoints' shared-mode formats. Windows only, and only when the cable is
+   * on the inbound leg (listed in `devices`) and its formats could be read — absent means unknown, never "fine".
+   */
+  hifiFormat?: HiFiCableFormats;
+  /** The two sides disagree on rate or depth, so the cable passes no sound. See audio-device-format.ts. */
+  hifiFormatMismatch?: boolean;
 }
 
 export interface VirtualAudioRiskControl {
@@ -254,9 +267,9 @@ const WINDOWS_PROVIDERS: ReadonlyArray<VirtualAudioProvider> = [
    * Two things are not yet confirmed on a real Windows 10/11 machine: the exact "(VB-Audio …)"
    * suffix, which is why matching is by the stem, and the driver itself, whose download page still
    * lists Windows 8 as the newest release target. It also passes no sound unless both of its sides
-   * share the exact same sample rate AND bit depth. The installer aligns both endpoints to 24-bit
-   * 48 kHz automatically (resources/windows-audio-drivers/install-cables.ps1); users who
-   * installed the cables manually need to align them in Windows Sound Settings.
+   * share the exact same sample rate AND bit depth. The app aligns both endpoints to 24-bit 48 kHz
+   * at runtime (audio-device-format.ts) and the status reports `hifiFormatMismatch`; the installer
+   * used to try this by writing the registry, which never took effect.
    *
    * Not a separate recommendation: VB-CABLE stays `recommendedProviderId`, because it is the leg
    * without which nothing reaches the meeting at all. This one upgrades the inbound leg.
@@ -520,6 +533,49 @@ export function detectVirtualAudio(runtimeReady = false): VirtualAudioStatus {
   }
 
   return describeMacVirtualAudio(readHalDirectory());
+}
+
+/**
+ * `detectVirtualAudio` plus the Hi-Fi Cable formats, for the status the web app reads.
+ *
+ * Kept apart from `detectVirtualAudio`, which stays synchronous for the loopback runtime and the
+ * capability probe that call it on their own paths. A failed read omits the fields rather than
+ * failing the status: the cable may still work, and a status error would hide every other leg.
+ *
+ * The read is cached and shared (readHiFiCableFormatsCached): the web app asks for this status on
+ * every devicechange, and an uncached read is a PowerShell spawn of about two seconds each time.
+ */
+export async function detectVirtualAudioWithFormats(
+  runtimeReady = false,
+  readFormats: () => Promise<HiFiCableFormats> = readHiFiCableFormatsCached,
+): Promise<VirtualAudioStatus> {
+  const status = detectVirtualAudio(runtimeReady);
+  return withHiFiCableFormat(status, readFormats);
+}
+
+/**
+ * Whether the status puts Hi-Fi Cable on the inbound leg.
+ *
+ * The status lists Hi-Fi Cable only when it forms the full bridge with VB-CABLE. Anywhere else its
+ * format decides nothing — inbound is not riding it — so there is nothing worth a PowerShell spawn.
+ */
+function usesHiFiCable(status: VirtualAudioStatus): boolean {
+  return status.devices.some((device) => device.providerId === WINDOWS_INBOUND_CABLE_ID && device.installed);
+}
+
+export async function withHiFiCableFormat(
+  status: VirtualAudioStatus,
+  readFormats: () => Promise<HiFiCableFormats> = readHiFiCableFormatsCached,
+): Promise<VirtualAudioStatus> {
+  if (status.platform !== "win32" || !usesHiFiCable(status)) return status;
+  try {
+    const formats = await readFormats();
+    if (!formats.input && !formats.output) return status;
+    return { ...status, hifiFormat: formats, hifiFormatMismatch: isHiFiFormatMismatch(formats) };
+  } catch (error) {
+    console.warn("Could not read the Hi-Fi Cable formats:", error);
+    return status;
+  }
 }
 
 /**
