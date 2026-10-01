@@ -3,7 +3,8 @@
 ; Sets up the Google Meet bridge cables (VB-CABLE and Hi-Fi Cable, VB-Audio donationware) as part of
 ; installing WarpTalk. See resources/windows-audio-drivers/README.md.
 ;
-; Interactive installs only. Auto-updates run this installer with /S, and a UAC prompt in the middle
+; Interactive installs only. Auto-updates run this installer with /S (updater.ts calls
+; quitAndInstall(true, true); with no arguments it would run WITHOUT /S and land here), and a UAC prompt in the middle
 ; of a silent update is exactly what an update must never do; the cables are already there by then.
 ; One elevated PowerShell runs both setups, so the user sees one UAC prompt, not one per cable.
 

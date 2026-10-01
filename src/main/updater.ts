@@ -1,60 +1,111 @@
 /**
- * The Electron shell updating itself (WT-618).
+ * The Electron shell updating itself (WT-618), and telling the user about it.
  *
- * WHY IN THE MAIN PROCESS, WITH NATIVE UI
+ * WHY IN THE MAIN PROCESS, WITH SHELL-OWNED UI
  *   The renderer is a remote web app that ships on its own schedule. Update UI there would have to
  *   agree with whichever shell version happened to load it, and it would vanish exactly when an
- *   update matters most - when the web app fails to load. A native dialog and a tray item depend on
- *   nothing but this file.
+ *   update matters most - when the web app fails to load. The card (update-card.ts), the Windows
+ *   notification and the tray item depend on nothing but the shell.
  *
  * WHAT THE USER SEES
- *   Nothing, until a newer build has finished downloading. electron-updater's defaults are kept on
- *   purpose: `autoDownload` fetches silently and `autoInstallOnAppQuit` installs on the next quit,
- *   so an update never interrupts a meeting to happen. The one interruption is a two-button dialog
- *   once the download is done, asked once per version, where Escape means Later.
- *   Failures - offline, rate limited, DNS - are logged to updater.log and never shown, except in
- *   answer to the tray's "Check for Updates…", where the user asked and is owed an answer.
+ *   The first version of this file said nothing until a 118 MB download had finished, then asked
+ *   once in a dialog that could open behind Google Meet, and treated "Later" as "on the next Quit"
+ *   in an app whose close button hides it to the tray. Users kept downloading releases by hand.
+ *   Now:
+ *     - available / downloading: a card in the main window with the progress, and one notification
+ *       if the window is not in front;
+ *     - ready: the card with Install and Later, one notification, a first tray item and a dot on the
+ *       tray icon, all of which stay until the update is installed (Later hides only the card, for
+ *       four hours);
+ *     - Install: a silent install that reopens the app. Asked again first if a meeting is running.
+ *   Check failures - offline, rate limited, DNS - are logged to updater.log and retried after
+ *   fifteen minutes, never shown, except in answer to the tray's "Check for Updates…".
+ *
+ * WHY THE INSTALL IS SILENT
+ *   `quitAndInstall()` with no arguments runs the NSIS installer with its UI. resources/installer.nsh
+ *   installs the audio cables, behind a UAC prompt, on every install that is not silent - so each
+ *   update looked exactly like reinstalling the app. `quitAndInstall(true, true)` passes /S and
+ *   --force-run: no installer UI, no UAC, and the new version starts by itself.
  *
  * WHERE THE FEED COMES FROM
- *   Nowhere in this file. Both electron-builder configs carry a `publish:` github block, so the
- *   packaged app has resources/app-update.yml and electron-updater reads the latest GitHub release
- *   from it. scripts/check-release-contract.mjs fails CI if that block goes away.
+ *   Nowhere in this file for an installed build: both electron-builder configs carry a `publish:`
+ *   github block, so the packaged app has resources/app-update.yml. scripts/check-release-contract.mjs
+ *   fails CI if that block goes away. Builds that cannot install an update - portable, and macOS
+ *   and Linux until they can (WT-674) - never touch electron-updater: they read the release's
+ *   latest*.yml themselves and are only ever told "a newer version exists", with a Download button.
  *
  * Decisions live in update-policy.ts, where they are tested; this file only carries them out.
  */
 
-import { app, dialog, shell } from "electron";
+import { app, dialog, net, Notification, powerMonitor, shell, type BrowserWindow } from "electron";
 import { autoUpdater, type UpdateCheckResult } from "electron-updater";
 import path from "path";
 
+import { UpdateCard } from "./update-card";
 import {
   FIRST_CHECK_DELAY_MS,
-  RECHECK_INTERVAL_MS,
+  NO_DISMISSAL,
   RELEASES_PAGE_URL,
+  dismissAfter,
   interactiveCheckDialog,
+  isNewerVersion,
+  nextCheckDelay,
+  notifyOnlyFeed,
+  notifyOnlyFeedUrl,
+  parseFeedVersion,
+  releaseNotesUrl,
   restartChoice,
   restartDialog,
-  shouldPromptRestart,
+  shouldCheckNow,
   summarizeUpdateError,
+  toastFor,
+  toastText,
+  updateCardModel,
   updaterGate,
+  type CardDismissal,
+  type CheckReason,
   type InteractiveCheckOutcome,
+  type ManualUpdateReason,
+  type UpdateCardAction,
+  type UpdatePhase,
   type UpdaterGate,
 } from "./update-policy";
 import { createUpdaterLogger, type UpdaterLogger } from "./updater-log";
 
+/** What the updater needs from the rest of the app. */
+export interface UpdaterHost {
+  getMainWindow(): BrowserWindow | null;
+  /** Shows, restores and focuses the main window, creating it if needed. */
+  revealMainWindow(): void;
+  /** A bridge popup open, loopback capturing, or the main window in a live room. */
+  isMeetingActive(): boolean;
+  /** The tray reads getUpdatePhase(); this says it should. */
+  onPhaseChange(): void;
+  iconPath: string;
+}
+
+type Mode = "install" | "notify-only";
+
 let logger: UpdaterLogger | null = null;
 let gate: UpdaterGate | null = null;
-let active = false;
+let host: UpdaterHost | null = null;
+let mode: Mode | null = null;
+/** Set in notify-only mode: which feed file to read, and why this build cannot install. */
+let notifyOnly: { why: ManualUpdateReason; file: string } | null = null;
 let interactiveCheck: Promise<void> | null = null;
 
-const state = {
-  /** Set from `update-available` until the download finishes or fails. */
-  downloadingVersion: null as string | null,
-  /** A build on disk, waiting for a restart or a quit. */
-  downloadedVersion: null as string | null,
-  lastPromptedVersion: null as string | null,
-  dialogOpen: false,
-};
+let phase: UpdatePhase = { kind: "idle" };
+let dismissal: CardDismissal = NO_DISMISSAL;
+let confirmingInstall = false;
+let lastCheckAt: number | null = null;
+let checkRunning = false;
+let scheduled: NodeJS.Timeout | null = null;
+let snoozeTimer: NodeJS.Timeout | null = null;
+const toastsShown = new Set<string>();
+/** Kept referenced: a Notification collected by the GC loses its click handler on Windows. */
+const liveToasts = new Set<Notification>();
+
+const card = new UpdateCard((action) => handleCardAction(action));
 
 function log(): UpdaterLogger {
   logger ??= createUpdaterLogger(path.join(app.getPath("logs"), "updater.log"));
@@ -66,16 +117,31 @@ function currentGate(): UpdaterGate {
   return gate;
 }
 
+export function getUpdatePhase(): UpdatePhase {
+  return phase;
+}
+
 /** Call once, after `app.whenReady()`. */
-export function initAutoUpdater(): void {
-  if (active) return;
+export function initAutoUpdater(appHost: UpdaterHost): void {
+  if (mode) return;
+  host = appHost;
   const decided = currentGate();
   log().info(`${app.getName()} ${app.getVersion()} on ${process.platform}/${process.arch}`);
   if (!decided.enabled) {
-    log().info(`Auto-update skipped: ${decided.reason}`);
+    notifyOnly = notifyOnlyFeed(decided);
+    if (!notifyOnly) {
+      log().info(`Auto-update skipped: ${decided.reason}`);
+      return;
+    }
+    // electron-updater is never touched on this path. See update-policy.ts notifyOnlyFeed.
+    mode = "notify-only";
+    log().info(`Auto-update skipped: ${decided.reason}. Checking ${notifyOnly.file} to tell the user instead.`);
+    powerMonitor.on("resume", () => triggerCheck("resume"));
+    powerMonitor.on("unlock-screen", () => triggerCheck("unlock"));
+    schedule(FIRST_CHECK_DELAY_MS);
     return;
   }
-  active = true;
+  mode = "install";
 
   // Touched only past the gate: this getter constructs the platform updater on first access, and
   // on macOS that would be a MacUpdater no ad-hoc signed bundle can satisfy.
@@ -83,71 +149,246 @@ export function initAutoUpdater(): void {
   // Releases ship the full NSIS installer, never the nsis-web stub. Refusing web-installer update
   // info closes a path nothing here uses; electron-updater warns on every download until it is set.
   autoUpdater.disableWebInstaller = true;
+
   log().info(
     `Auto-update on: autoDownload=${autoUpdater.autoDownload} autoInstallOnAppQuit=${autoUpdater.autoInstallOnAppQuit}`,
   );
 
   autoUpdater.on("update-available", (info) => {
-    state.downloadingVersion = info.version;
+    if (phase.kind !== "ready" || phase.version !== info.version) {
+      setPhase({ kind: "available", version: info.version });
+    }
+  });
+  autoUpdater.on("update-not-available", () => {
+    if (phase.kind === "available") setPhase({ kind: "idle" });
+  });
+  autoUpdater.on("download-progress", (progress) => {
+    const version = phase.kind === "available" || phase.kind === "downloading" ? phase.version : null;
+    if (!version) return;
+    const next: UpdatePhase = {
+      kind: "downloading",
+      version,
+      percent: progress.percent,
+      transferred: progress.transferred,
+      total: progress.total,
+    };
+    // One repaint per whole percent is plenty; electron-updater reports far more often.
+    if (phase.kind === "downloading" && Math.floor(phase.percent) === Math.floor(progress.percent)) {
+      phase = next;
+      return;
+    }
+    setPhase(next);
   });
   autoUpdater.on("update-downloaded", (event) => {
-    state.downloadingVersion = null;
-    state.downloadedVersion = event.version;
-    void promptRestart(event.version, false);
+    log().info(`Update ${event.version} downloaded and ready to install`);
+    setPhase({ kind: "ready", version: event.version });
   });
-  // Log only. Every network failure arrives here, and a dialog for each one would be a dialog
-  // every six hours for anyone on a flaky connection.
+  // Log only. Every network failure arrives here; the retry is scheduled by runCheck.
   autoUpdater.on("error", (error) => {
-    state.downloadingVersion = null;
     log().error(`Update error: ${summarizeUpdateError(error)}`);
+    if (phase.kind === "available" || phase.kind === "downloading") {
+      // The download failed after its check had already succeeded and booked the next one an hour
+      // out; retry on the error schedule instead.
+      setPhase({ kind: "idle" });
+      if (!checkRunning) schedule(nextCheckDelay(true));
+    }
   });
 
-  setTimeout(backgroundCheck, FIRST_CHECK_DELAY_MS);
-  setInterval(backgroundCheck, RECHECK_INTERVAL_MS);
+  powerMonitor.on("resume", () => triggerCheck("resume"));
+  powerMonitor.on("unlock-screen", () => triggerCheck("unlock"));
+
+  schedule(FIRST_CHECK_DELAY_MS);
 }
 
-function backgroundCheck(): void {
-  if (state.downloadingVersion) {
-    log().info(`Skipping scheduled check: ${state.downloadingVersion} is still downloading`);
+/** index.ts calls this when the main window is shown or created. */
+export function onMainWindowShown(): void {
+  card.refresh(host?.getMainWindow() ?? null);
+  triggerCheck("window-shown");
+}
+
+function schedule(delay: number): void {
+  if (scheduled) clearTimeout(scheduled);
+  scheduled = setTimeout(() => {
+    scheduled = null;
+    triggerCheck("scheduled");
+  }, delay);
+}
+
+function triggerCheck(reason: CheckReason): void {
+  if (!mode || checkRunning) return;
+  if (!shouldCheckNow({ reason, phase, lastCheckAt, now: Date.now() })) {
+    // A scheduled check skipped mid-download still has to come back later.
+    if (reason === "scheduled") schedule(nextCheckDelay(false));
     return;
   }
-  // A rejection has already been delivered to the `error` listener above.
+  log().info(`Checking for updates (${reason})`);
+  if (mode === "notify-only") {
+    void runFeedCheck().catch(() => {});
+    return;
+  }
+  // A rejection has already been delivered to the `error` listener.
   runCheck().catch(() => {});
 }
 
-async function runCheck(): Promise<UpdateCheckResult | null> {
-  const result = await autoUpdater.checkForUpdates();
-  // The download runs on after the check resolves, and its failure is emitted as `error` too.
-  // Unobserved, the same failure would also surface as an unhandled rejection.
-  result?.downloadPromise?.catch(() => {});
-  return result;
+/** Notify-only: read the release's feed file and compare versions. Resolves to the newer version, or null. */
+async function runFeedCheck(): Promise<string | null> {
+  if (!notifyOnly) return null;
+  checkRunning = true;
+  let failed = false;
+  try {
+    const response = await net.fetch(notifyOnlyFeedUrl(notifyOnly.file), { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status} for ${notifyOnly.file}`);
+    const latest = parseFeedVersion(await response.text());
+    if (!latest) throw new Error(`${notifyOnly.file} has no version`);
+    if (isNewerVersion(latest, app.getVersion())) {
+      log().info(`Found version ${latest}; this build cannot install it (${notifyOnly.why})`);
+      setPhase({ kind: "manual", version: latest, why: notifyOnly.why });
+      return latest;
+    }
+    log().info(`Up to date: latest is ${latest}`);
+    if (phase.kind === "manual") setPhase({ kind: "idle" });
+    return null;
+  } catch (error) {
+    failed = true;
+    log().error(`Update check failed: ${summarizeUpdateError(error)}`);
+    throw error;
+  } finally {
+    checkRunning = false;
+    lastCheckAt = Date.now();
+    schedule(nextCheckDelay(failed));
+  }
 }
 
-async function promptRestart(version: string, userAsked: boolean): Promise<void> {
-  if (
-    !shouldPromptRestart({
-      version,
-      lastPromptedVersion: state.lastPromptedVersion,
-      dialogOpen: state.dialogOpen,
-      userAsked,
-    })
-  ) {
+async function runCheck(): Promise<UpdateCheckResult | null> {
+  checkRunning = true;
+  let failed = false;
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    // The download runs on after the check resolves, and its failure is emitted as `error` too.
+    // Unobserved, the same failure would also surface as an unhandled rejection.
+    result?.downloadPromise?.catch(() => {});
+    return result;
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    checkRunning = false;
+    lastCheckAt = Date.now();
+    schedule(nextCheckDelay(failed));
+  }
+}
+
+function setPhase(next: UpdatePhase): void {
+  const changed = next.kind !== phase.kind || ("version" in next && "version" in phase && next.version !== phase.version);
+  phase = next;
+  if (next.kind !== "ready") confirmingInstall = false;
+  render();
+  if (changed) {
+    maybeToast();
+    host?.onPhaseChange();
+  }
+}
+
+function render(): void {
+  const win = host?.getMainWindow() ?? null;
+  card.show(
+    win,
+    updateCardModel({ appName: app.getName(), phase, dismissal, now: Date.now(), confirmingInstall }),
+  );
+}
+
+function windowInFront(): boolean {
+  const win = host?.getMainWindow();
+  return !!win && !win.isDestroyed() && win.isVisible() && !win.isMinimized() && win.isFocused();
+}
+
+function maybeToast(): void {
+  const decided = toastFor({ phase, alreadyShown: toastsShown, windowInFront: windowInFront() });
+  if (!decided || !Notification.isSupported() || !("version" in phase)) return;
+  toastsShown.add(decided.key);
+  const text = toastText(app.getName(), decided.kind, phase.version);
+  const toast = new Notification({ ...text, icon: host?.iconPath });
+  liveToasts.add(toast);
+  const release = (): void => void liveToasts.delete(toast);
+  toast.on("close", release);
+  toast.on("click", () => {
+    release();
+    if (decided.kind === "manual") {
+      void shell.openExternal(RELEASES_PAGE_URL);
+      return;
+    }
+    showCard();
+  });
+  toast.show();
+}
+
+/** Brings the main window forward with the card on it, un-snoozed. */
+function showCard(): void {
+  dismissal = NO_DISMISSAL;
+  host?.revealMainWindow();
+  render();
+}
+
+function handleCardAction(action: UpdateCardAction): void {
+  const now = Date.now();
+  switch (action) {
+    case "install":
+      if (host?.isMeetingActive()) {
+        confirmingInstall = true;
+        render();
+        return;
+      }
+      installNow();
+      return;
+    case "confirm-install":
+      installNow();
+      return;
+    case "cancel-install":
+      confirmingInstall = false;
+      render();
+      return;
+    case "notes":
+      if ("version" in phase) void shell.openExternal(releaseNotesUrl(phase.version));
+      return;
+    case "download":
+      void shell.openExternal(RELEASES_PAGE_URL);
+      return;
+    case "later":
+    case "dismiss":
+      dismissal = dismissAfter(action, phase, dismissal, now);
+      confirmingInstall = false;
+      log().info(`Update card: ${action} on ${phase.kind}`);
+      render();
+      if (snoozeTimer) clearTimeout(snoozeTimer);
+      if (dismissal.snoozedUntil > now) {
+        snoozeTimer = setTimeout(render, dismissal.snoozedUntil - now + 1000);
+      }
+      return;
+  }
+}
+
+/** The tray's "Restart to update" item, the card's Install, and the ready dialog all end here. */
+export function installUpdate(): void {
+  if (phase.kind === "manual") {
+    void shell.openExternal(RELEASES_PAGE_URL);
     return;
   }
-  state.dialogOpen = true;
-  state.lastPromptedVersion = version;
-  try {
-    log().info(`Asking to restart into ${version}`);
-    const { response } = await dialog.showMessageBox(restartDialog(app.getName(), version));
-    if (restartChoice(response) === "restart") {
-      log().info(`Restart now: handing over to the ${version} installer`);
-      autoUpdater.quitAndInstall();
-    } else {
-      log().info(`Later: ${version} will be installed on quit`);
-    }
-  } finally {
-    state.dialogOpen = false;
+  if (phase.kind !== "ready") return;
+  if (host?.isMeetingActive()) {
+    // Ask on the card, where the answer is visible next to the meeting it would end.
+    confirmingInstall = true;
+    showCard();
+    return;
   }
+  installNow();
+}
+
+function installNow(): void {
+  if (phase.kind !== "ready") return;
+  log().info(`Installing ${phase.version}: silent, relaunching afterwards`);
+  // isSilent: /S, so installer.nsh skips the cable setup and its UAC prompt, and there is no
+  // installer window. isForceRunAfter: --force-run, so the new version opens by itself.
+  autoUpdater.quitAndInstall(true, true);
 }
 
 async function showOutcome(outcome: InteractiveCheckOutcome): Promise<void> {
@@ -159,7 +400,7 @@ async function showOutcome(outcome: InteractiveCheckOutcome): Promise<void> {
 }
 
 /**
- * The tray's "Check for Updates…". Always answers: up to date, downloading, ready to restart,
+ * The tray's "Check for Updates…". Always answers: up to date, downloading, ready to install,
  * could not check, or why this build does not update itself.
  */
 export function checkForUpdatesInteractive(): Promise<void> {
@@ -173,15 +414,30 @@ export function checkForUpdatesInteractive(): Promise<void> {
 
 async function runInteractiveCheck(): Promise<void> {
   const decided = currentGate();
+  if (mode === "notify-only" && !decided.enabled) {
+    // Ask the feed now; a newer version gets the card, anything else the gated explanation.
+    let newer: string | null = null;
+    try {
+      newer = await runFeedCheck();
+    } catch (error) {
+      return showOutcome({ kind: "failed", error: summarizeUpdateError(error) });
+    }
+    if (newer) {
+      showCard();
+      return;
+    }
+    return showOutcome({ kind: "up-to-date", currentVersion: app.getVersion() });
+  }
   if (!decided.enabled) {
     log().info(`Check for Updates skipped: ${decided.reason}`);
     return showOutcome({ kind: "gated", gate: decided });
   }
-  if (!active) return; // initAutoUpdater has not run; nothing is wired to answer with.
+  if (!mode) return; // initAutoUpdater has not run; nothing is wired to answer with.
 
-  if (state.downloadedVersion) return promptRestart(state.downloadedVersion, true);
-  if (state.downloadingVersion) {
-    return showOutcome({ kind: "downloading", version: state.downloadingVersion });
+  if (phase.kind === "ready") return answerReady(phase.version);
+  if (phase.kind === "downloading" || phase.kind === "available") {
+    showCard();
+    return;
   }
 
   let result: UpdateCheckResult | null;
@@ -193,22 +449,16 @@ async function runInteractiveCheck(): Promise<void> {
   if (!result?.isUpdateAvailable) {
     return showOutcome({ kind: "up-to-date", currentVersion: app.getVersion() });
   }
+  // Available, downloading, or (from the cache) already ready: the card says which.
+  showCard();
+}
 
-  // A build left in the cache by an earlier session "downloads" at once, and `update-downloaded`
-  // has then already put the restart dialog up - saying "downloading" on top of it would be wrong.
-  const version = result.updateInfo.version;
-  const download = result.downloadPromise;
-  const finishedAtOnce = download
-    ? await Promise.race([
-        download.then(
-          () => true,
-          () => false,
-        ),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1500)),
-      ])
-    : false;
-  if (finishedAtOnce || state.downloadedVersion === version) {
-    return promptRestart(version, true);
+/** A ready build, asked about from the tray: the card if there is a window for it, else a dialog. */
+async function answerReady(version: string): Promise<void> {
+  if (host?.getMainWindow()) {
+    showCard();
+    return;
   }
-  return showOutcome({ kind: "downloading", version });
+  const { response } = await dialog.showMessageBox(restartDialog(app.getName(), version));
+  if (restartChoice(response) === "restart") installUpdate();
 }
