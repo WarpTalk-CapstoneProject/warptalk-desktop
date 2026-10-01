@@ -14,7 +14,11 @@ import {
   STALE_CHECK_MS,
   dismissAfter,
   interactiveCheckDialog,
+  isNewerVersion,
   nextCheckDelay,
+  notifyOnlyFeed,
+  notifyOnlyFeedUrl,
+  parseFeedVersion,
   parseCardAction,
   releaseNotesUrl,
   restartChoice,
@@ -259,7 +263,7 @@ test("closing the download card hides it until the build is ready", () => {
 });
 
 test("a portable copy is told about new versions and sent to the download page", () => {
-  const manual = card({ kind: "manual", version: "0.4.8" });
+  const manual = card({ kind: "manual", version: "0.4.8", why: "portable" });
   assert.deepEqual(manual.buttons.map((b) => b.action), ["download"]);
   assert.match(manual.detail, /portable/);
   assert.equal(card({ kind: "idle" }), null);
@@ -338,4 +342,50 @@ test("the tray dot is drawn in the corner and leaves the rest of the icon alone"
   assert.deepEqual(px(2, size - 3), [0x40, 0x40, 0x40, 0x40], "bottom-left untouched");
   assert.equal(icon[((r - 1) * size + (size - r)) * 4], 0x40, "the source bitmap is not modified");
   assert.equal(withUpdateDot(Buffer.alloc(3), size, size).length, 3, "a bitmap of the wrong size is returned as is");
+});
+
+test("macOS and Linux are told about new versions from their own feed file, and sent to download it", () => {
+  assert.deepEqual(notifyOnlyFeed(updaterGate({ ...installed, platform: "darwin" })), { why: "macos", file: "latest-mac.yml" });
+  assert.deepEqual(notifyOnlyFeed(updaterGate({ ...installed, platform: "linux" })), { why: "linux", file: "latest-linux.yml" });
+  assert.deepEqual(
+    notifyOnlyFeed(updaterGate({ ...installed, env: { PORTABLE_EXECUTABLE_DIR: "D:\\" } })),
+    { why: "portable", file: "latest.yml" },
+  );
+  assert.equal(notifyOnlyFeed(updaterGate({ ...installed, isPackaged: false })), null, "a dev run checks nothing");
+  assert.equal(notifyOnlyFeed(updaterGate(installed)), null, "Windows installs itself");
+  assert.equal(
+    notifyOnlyFeedUrl("latest-mac.yml"),
+    "https://github.com/WarpTalk-CapstoneProject/warptalk-desktop/releases/latest/download/latest-mac.yml",
+  );
+
+  const mac = card({ kind: "manual", version: "0.4.8", why: "macos" });
+  assert.deepEqual(mac.buttons.map((b) => b.action), ["download"]);
+  assert.match(mac.detail, /installer/);
+  assert.doesNotMatch(mac.detail, /portable/);
+});
+
+test("the feed file's version is read the way electron-builder writes it", () => {
+  // Verbatim shape of the v0.4.7 latest.yml.
+  const yml = [
+    "version: 0.4.7",
+    "files:",
+    "  - url: WarpTalk-Setup-0.4.7.exe",
+    "    size: 118440005",
+    "path: WarpTalk-Setup-0.4.7.exe",
+    "releaseDate: '2026-09-30T13:47:23.666Z'",
+    "",
+  ].join("\n");
+  assert.equal(parseFeedVersion(yml), "0.4.7");
+  assert.equal(parseFeedVersion("version: '1.2.3-beta.1'\n"), "1.2.3-beta.1");
+  assert.equal(parseFeedVersion("<html>rate limited</html>"), null);
+});
+
+test("only a strictly newer release counts as an update", () => {
+  assert.equal(isNewerVersion("0.4.8", "0.4.7"), true);
+  assert.equal(isNewerVersion("0.10.0", "0.9.9"), true, "numeric, not lexical");
+  assert.equal(isNewerVersion("0.4.7", "0.4.7"), false);
+  assert.equal(isNewerVersion("0.4.6", "0.4.7"), false, "never offer a downgrade");
+  assert.equal(isNewerVersion("0.4.7", "0.4.7-beta.1"), true);
+  assert.equal(isNewerVersion("0.4.8-beta.1", "0.4.8"), false);
+  assert.equal(isNewerVersion("garbage", "0.4.7"), false);
 });

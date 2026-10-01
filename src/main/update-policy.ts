@@ -232,7 +232,8 @@ export function summarizeUpdateError(error: unknown): string {
 /**
  * Where the update is, as the user should see it.
  *
- * `manual` is a portable copy: the feed says there is a newer build, and the only way to it is the
+ * `manual` is a build that cannot install updates itself - a portable copy, or macOS and Linux
+ * until they can (WT-674): the feed says there is a newer build, and the only way to it is the
  * download page.
  */
 export type UpdatePhase =
@@ -240,7 +241,9 @@ export type UpdatePhase =
   | { kind: "available"; version: string }
   | { kind: "downloading"; version: string; percent: number; transferred: number; total: number }
   | { kind: "ready"; version: string }
-  | { kind: "manual"; version: string };
+  | { kind: "manual"; version: string; why: ManualUpdateReason };
+
+export type ManualUpdateReason = "portable" | "macos" | "linux";
 
 /** What the user has done to the card this session. Forgotten on relaunch, on purpose. */
 export interface CardDismissal {
@@ -297,6 +300,12 @@ export interface UpdateCardModel {
 function megabytes(bytes: number): string {
   return String(Math.max(0, Math.round(bytes / (1024 * 1024))));
 }
+
+const MANUAL_DETAIL: Record<ManualUpdateReason, string> = {
+  portable: "This portable copy can't update itself. Download the installer to get automatic updates.",
+  macos: "Download the new installer and open it to update. Automatic updates are coming to macOS.",
+  linux: "Download the new package and install it to update.",
+};
 
 function isSnoozed(dismissal: CardDismissal, version: string, now: number): boolean {
   return dismissal.snoozedVersion === version && now < dismissal.snoozedUntil;
@@ -379,7 +388,7 @@ export function updateCardModel(input: {
       if (isSnoozed(dismissal, phase.version, now)) return null;
       return {
         title: `${appName} ${phase.version} is available`,
-        detail: "This portable copy can't update itself. Download the installer to get automatic updates.",
+        detail: MANUAL_DETAIL[phase.why],
         progress: null,
         buttons: [{ action: "download", label: "Download", style: "primary" }],
         dismissible: true,
@@ -505,4 +514,55 @@ export function parseCardAction(url: string): UpdateCardAction | null {
   if (!url.startsWith(UPDATE_CARD_SCHEME)) return null;
   const action = url.slice(UPDATE_CARD_SCHEME.length);
   return (UPDATE_CARD_ACTIONS as readonly string[]).includes(action) ? (action as UpdateCardAction) : null;
+}
+
+/**
+ * Which builds are told about new versions without installing them, and which feed file tells them.
+ *
+ * These never touch electron-updater: on macOS its getter constructs a MacUpdater, and Squirrel.Mac
+ * cannot be trusted on an ad-hoc signed bundle (see updaterGate). Reading the feed file electron-
+ * builder already publishes next to every release needs nothing but an HTTPS GET.
+ */
+export function notifyOnlyFeed(gate: UpdaterGate): { why: ManualUpdateReason; file: string } | null {
+  if (gate.enabled) return null;
+  switch (gate.code) {
+    case "portable":
+      return { why: "portable", file: "latest.yml" };
+    case "macos-unsigned":
+      return { why: "macos", file: "latest-mac.yml" };
+    case "linux":
+      return { why: "linux", file: "latest-linux.yml" };
+    case "not-packaged":
+      return null;
+  }
+}
+
+/** The feed file of the newest non-draft release, via GitHub's own redirect. */
+export function notifyOnlyFeedUrl(file: string): string {
+  return `https://github.com/WarpTalk-CapstoneProject/warptalk-desktop/releases/latest/download/${file}`;
+}
+
+/** `version:` from an electron-builder latest*.yml. Null when there is none. */
+export function parseFeedVersion(yml: string): string | null {
+  const match = /^version:\s*['"]?v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)['"]?\s*$/m.exec(yml);
+  return match ? match[1] : null;
+}
+
+/**
+ * Whether `candidate` is a newer release than `current`. Major.minor.patch only; a prerelease of the
+ * same version counts as older, and anything unparsable as not newer - a wrong "update available"
+ * is worse than a missed one, since the missed one is caught at the next check.
+ */
+export function isNewerVersion(candidate: string, current: string): boolean {
+  const parse = (v: string): [number[], boolean] | null => {
+    const m = /^v?(\d+)\.(\d+)\.(\d+)(-.+)?$/.exec(v.trim());
+    return m ? [[Number(m[1]), Number(m[2]), Number(m[3])], m[4] !== undefined] : null;
+  };
+  const a = parse(candidate);
+  const b = parse(current);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) {
+    if (a[0][i] !== b[0][i]) return a[0][i] > b[0][i];
+  }
+  return !a[1] && b[1];
 }
