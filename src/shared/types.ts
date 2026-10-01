@@ -47,6 +47,20 @@ export interface WarpTalkAPI {
    * desktop builds that predate it.
    */
   reportSignedIn?: (signedIn: boolean) => Promise<void>;
+  /**
+   * Speaker names from Google Meet's own captions, for the meeting being bridged (Windows only,
+   * behind the `bridgeMeetCaptionNames` flag). Start streaming with `setMeetCaptionsStream`; each
+   * caption block is delivered once stable (`kind:"caption"`) and again if Meet rewrites it
+   * (`kind:"update"`, same `blockId`). All optional: absent on desktop builds that predate them.
+   */
+  onMeetCaption?: (callback: (event: MeetCaptionEvent) => void) => () => void;
+  onMeetCaptionStatus?: (callback: (status: MeetCaptionStatus) => void) => () => void;
+  setMeetCaptionsStream?: (meetCode: string, enabled: boolean) => Promise<void>;
+  /**
+   * Turns Meet's CC on in the capturer's Chrome window if it is off - only via Meet's real CC
+   * button, never focus or keys, never off. `ok:false` means ask the host to turn CC on manually.
+   */
+  ensureMeetCaptions?: (meetCode: string) => Promise<EnsureMeetCaptionsResult>;
   minimize: () => void;
   maximize: () => void;
   close: () => void;
@@ -178,6 +192,62 @@ export interface MeetPresence {
   /** Present only when the title carried a room code, which a named meeting never does. */
   meetCode?: string;
   observedAtMs: number;
+}
+
+/**
+ * One caption block from Google Meet's CC, final enough to attribute a speaker.
+ *
+ * A speaker-name ANCHOR for attribution, not a transcript: WarpTalk's own STT writes the text.
+ *
+ * Times are ms on the Date.now() axis (monotonic within a session): `tStartMs` when the block
+ * first appeared, `tEndMs` when its final text was first seen, `tStableMs` when it was judged
+ * final. Captions trail speech by about 0.5-1.5 s. `tConfidence:"batch"` means the text arrived in
+ * a burst (first read of a stream, after the tab was inactive/minimized, or Chrome held updates
+ * back), so its times are not when it was said - match it by text. `stale` is true when the
+ * sensor was not `live` at emission.
+ */
+export interface MeetCaptionEvent {
+  meetCode: string;
+  /** Stable for the block's life; an `update` replaces the earlier text of the same id. */
+  blockId: string;
+  kind: "caption" | "update";
+  speaker: string;
+  text: string;
+  tStartMs: number;
+  tEndMs: number;
+  tStableMs: number;
+  tConfidence: "live" | "batch";
+  stale: boolean;
+  source: "meet_caption";
+}
+
+/**
+ * Sent when it changes. `state`:
+ *   live                      the Meet tab is the active tab of a visible window and readable;
+ *   unavailable_tab_inactive  no window's active tab is this meeting (tab switched - Meet's auto
+ *                             picture-in-picture exposes no captions - closed, or the read failed);
+ *   unavailable_minimized     the window holding the tab is minimized;
+ *   stale                     readable, captions on, audio being captured, yet nothing changed for
+ *                             8 s - silence, or Chrome holding accessibility updates back. A hint.
+ * `captionsVisible` false while live means Meet's CC is off.
+ */
+export interface MeetCaptionStatus {
+  meetCode: string;
+  running: boolean;
+  state: "live" | "unavailable_tab_inactive" | "unavailable_minimized" | "stale";
+  captionsVisible: boolean;
+  lastChangeMs: number | null;
+  error?: string;
+}
+
+export interface EnsureMeetCaptionsResult {
+  ok: boolean;
+  state: "on" | "off" | "unknown";
+  /**
+   * Why not, e.g. "cc-button-hidden" (narrow window: CC is inside More options), "unknown-locale",
+   * "meet-tab-not-found", "verify-button-not-flipped", "disabled", "unsupported-platform".
+   */
+  reason?: string;
 }
 
 export interface WindowsLoopbackPcmChunk {
