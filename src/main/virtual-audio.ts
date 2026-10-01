@@ -25,7 +25,7 @@ import os from "os";
 
 import {
   isHiFiFormatMismatch,
-  readHiFiCableFormats,
+  readHiFiCableFormatsCached,
   type HiFiCableFormats,
 } from "./audio-device-format.ts";
 
@@ -72,7 +72,7 @@ export interface VirtualAudioStatus {
   foreignDrivers: string[];
   /**
    * Both Hi-Fi Cable endpoints' shared-mode formats. Windows only, and only when the cable is
-   * there and its formats could be read — absent means unknown, never "fine".
+   * on the inbound leg (listed in `devices`) and its formats could be read — absent means unknown, never "fine".
    */
   hifiFormat?: HiFiCableFormats;
   /** The two sides disagree on rate or depth, so the cable passes no sound. See audio-device-format.ts. */
@@ -541,20 +541,33 @@ export function detectVirtualAudio(runtimeReady = false): VirtualAudioStatus {
  * Kept apart from `detectVirtualAudio`, which stays synchronous for the loopback runtime and the
  * capability probe that call it on their own paths. A failed read omits the fields rather than
  * failing the status: the cable may still work, and a status error would hide every other leg.
+ *
+ * The read is cached and shared (readHiFiCableFormatsCached): the web app asks for this status on
+ * every devicechange, and an uncached read is a PowerShell spawn of about two seconds each time.
  */
 export async function detectVirtualAudioWithFormats(
   runtimeReady = false,
-  readFormats: () => Promise<HiFiCableFormats> = readHiFiCableFormats,
+  readFormats: () => Promise<HiFiCableFormats> = readHiFiCableFormatsCached,
 ): Promise<VirtualAudioStatus> {
   const status = detectVirtualAudio(runtimeReady);
   return withHiFiCableFormat(status, readFormats);
 }
 
+/**
+ * Whether the status puts Hi-Fi Cable on the inbound leg.
+ *
+ * The status lists Hi-Fi Cable only when it forms the full bridge with VB-CABLE. Anywhere else its
+ * format decides nothing — inbound is not riding it — so there is nothing worth a PowerShell spawn.
+ */
+function usesHiFiCable(status: VirtualAudioStatus): boolean {
+  return status.devices.some((device) => device.providerId === WINDOWS_INBOUND_CABLE_ID && device.installed);
+}
+
 export async function withHiFiCableFormat(
   status: VirtualAudioStatus,
-  readFormats: () => Promise<HiFiCableFormats> = readHiFiCableFormats,
+  readFormats: () => Promise<HiFiCableFormats> = readHiFiCableFormatsCached,
 ): Promise<VirtualAudioStatus> {
-  if (status.platform !== "win32") return status;
+  if (status.platform !== "win32" || !usesHiFiCable(status)) return status;
   try {
     const formats = await readFormats();
     if (!formats.input && !formats.output) return status;

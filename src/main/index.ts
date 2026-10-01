@@ -199,6 +199,8 @@ function registerIpcHandlers(): void {
     return detectVirtualAudioWithFormats(windowsLoopbackRuntime.isReady());
   });
   ipcMain.handle("bridge:install-virtual-audio", () => runVirtualAudioInstaller());
+  // Single-flight inside alignHiFiCableFormat: a click while the startup align is still running
+  // joins that attempt instead of starting a second one on the same endpoints.
   ipcMain.handle("bridge:align-hifi-format", async () => {
     const result = await alignHiFiCableFormat();
     console.log("Hi-Fi Cable format alignment:", JSON.stringify(result));
@@ -661,7 +663,7 @@ async function openTranscriptWindow(
  * Only on a detected mismatch: a machine whose sides already agree, even at another rate, passes
  * sound and is left as the user set it. In the background, because it spawns PowerShell more than
  * once and nothing at startup should wait on that. See audio-device-format.ts for why this is not
- * left to the installer.
+ * left to the installer. The align it starts is the same single-flight one the IPC handler joins.
  */
 async function alignHiFiCableFormatIfMismatched(): Promise<void> {
   try {

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  HIFI_MIX_WAVEFORMAT,
   HIFI_TARGET_WAVEFORMAT,
   alignHiFiCableFormat,
   buildAlignScript,
@@ -10,7 +11,9 @@ import {
   isHiFiFormatMismatch,
   isHiFiTargetFormat,
   parseDeviceFormatBlob,
+  invalidateHiFiCableFormatsCache,
   parseWaveFormat,
+  readHiFiCableFormatsCached,
 } from "../audio-device-format.ts";
 import { withHiFiCableFormat } from "../virtual-audio.ts";
 
@@ -66,6 +69,25 @@ test("the target format is the stored 48 kHz/24-bit blob without its header", ()
   assert.ok(isHiFiTargetFormat(parseWaveFormat(HIFI_TARGET_WAVEFORMAT)));
 });
 
+test("the mix format is 32-bit float at the same rate and channels", () => {
+  assert.equal(HIFI_MIX_WAVEFORMAT.length, 40);
+  const view = new DataView(Uint8Array.from(HIFI_MIX_WAVEFORMAT).buffer);
+  assert.equal(view.getUint16(0, true), 0xfffe);
+  assert.equal(view.getUint16(2, true), 2);
+  assert.equal(view.getUint32(4, true), 48000);
+  assert.equal(view.getUint32(8, true), 384000);
+  assert.equal(view.getUint16(12, true), 8);
+  assert.equal(view.getUint16(14, true), 32);
+  assert.equal(view.getUint16(16, true), 22);
+  assert.equal(view.getUint16(18, true), 32);
+  assert.equal(view.getUint32(20, true), 3);
+  // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, not the PCM subtype the endpoint format carries.
+  assert.deepEqual(
+    [...HIFI_MIX_WAVEFORMAT.slice(24)],
+    hexBytes("03 00 00 00 00 00 10 00 80 00 00 AA 00 38 9B 71"),
+  );
+});
+
 test("endpoint ids are built from the registry key GUID, and anything else is refused", () => {
   assert.equal(
     endpointIdFromRegistryKey("render", "{9C81E614-7F23-4A6A-9990-627318F2EE6E}"),
@@ -91,11 +113,34 @@ test("Input is the render endpoint and Output the capture one", () => {
   assert.deepEqual(describeHiFiEndpoints([]), { input: null, output: null });
 });
 
+test("a renamed endpoint is still found by its driver's interface name", () => {
+  const vbInput = { flow: "render", key: "{3b00282a-82d2-4a85-8c3a-fc7a04a3a46f}", name: "CABLE Input", interfaceName: "VB-Audio Virtual Cable", blob: "" };
+  const endpoints = describeHiFiEndpoints([
+    vbInput,
+    { flow: "render", key: "{9c81e614-7f23-4a6a-9990-627318f2ee6e}", name: "Meet speaker", interfaceName: "VB-Audio Hi-Fi Cable", blob: INPUT_48K_24.replace(/ /g, "") },
+    { flow: "capture", key: "{7ece1a5d-4da7-4fdb-bb6a-b9a415b54c0a}", name: "WarpTalk in", interfaceName: "VB-Audio Hi-Fi Cable", blob: OUTPUT_44K_24.replace(/ /g, "") },
+  ]);
+  assert.equal(endpoints.input?.id, "{0.0.0.00000000}.{9c81e614-7f23-4a6a-9990-627318f2ee6e}");
+  assert.equal(endpoints.output?.id, "{0.0.1.00000000}.{7ece1a5d-4da7-4fdb-bb6a-b9a415b54c0a}");
+  // The interface name wins over a description match on the same flow.
+  const preferred = describeHiFiEndpoints([
+    { flow: "render", key: "{00000000-0000-0000-0000-000000000001}", name: "Hi-Fi Cable Input", interfaceName: "Something else", blob: "" },
+    { flow: "render", key: "{00000000-0000-0000-0000-000000000002}", name: "Renamed", interfaceName: "VB-Audio Hi-Fi Cable", blob: "" },
+  ]);
+  assert.equal(preferred.input?.id, "{0.0.0.00000000}.{00000000-0000-0000-0000-000000000002}");
+  // Another VB-Audio cable is never taken for Hi-Fi Cable.
+  assert.equal(describeHiFiEndpoints([vbInput]).input, null);
+});
+
 test("the align script sets the target bytes on exactly the endpoints it is given", () => {
   const script = buildAlignScript(["{0.0.1.00000000}.{7ece1a5d-4da7-4fdb-bb6a-b9a415b54c0a}"]);
   assert.match(script, /870af99c-171d-4f9e-af0d-e63df40c2bc9/);
   assert.match(script, /f8679f50-850a-41cf-9c72-430f290290c8/);
   assert.match(script, /0xfe,0xff,0x02,0x00,0x80,0xbb,0x00,0x00,0x00,0x65,0x04,0x00/);
+  // The float mix format goes in as the second buffer, not the PCM endpoint format twice.
+  assert.match(script, /\$mix = \[byte\[\]\]@\(0xfe,0xff,0x02,0x00,0x80,0xbb,0x00,0x00,0x00,0xdc,0x05,0x00,0x08,0x00,0x20,0x00/);
+  assert.match(script, /SetDeviceFormat\(id, endpointBuffer, mixBuffer\)/);
+  assert.match(script, /Set\(\$id, \$format, \$mix\)/);
   assert.match(script, /'\{0\.0\.1\.00000000\}\.\{7ece1a5d-4da7-4fdb-bb6a-b9a415b54c0a\}'/);
   assert.doesNotMatch(script, /0\.0\.0\.00000000/);
 });
@@ -107,7 +152,8 @@ test("aligning off Windows refuses without spawning anything", { skip: process.p
 });
 
 test("the status carries the formats only on Windows, and a failed read leaves it untouched", async () => {
-  const base = { platform: "win32", supported: true, devices: [], ready: false, foreignDrivers: [] };
+  const hifi = { leg: "inbound", driverBundle: "Hi-Fi Cable", deviceName: "Hi-Fi Cable Output (VB-Audio Hi-Fi Cable)", installed: true, providerId: "hifi-cable-free" };
+  const base = { platform: "win32", supported: true, devices: [hifi], ready: true, foreignDrivers: [] };
   const f48 = { sampleRate: 48000, bitsPerSample: 24, channels: 2 };
   const f441 = { sampleRate: 44100, bitsPerSample: 24, channels: 2 };
 
@@ -127,4 +173,60 @@ test("the status carries the formats only on Windows, and a failed read leaves i
     throw new Error("must not be called");
   });
   assert.equal("hifiFormat" in mac, false);
+});
+
+test("without Hi-Fi Cable on the inbound leg the formats are never read", async () => {
+  const status = { platform: "win32", supported: true, devices: [], ready: false, foreignDrivers: [] };
+  let reads = 0;
+  const result = await withHiFiCableFormat(status, async () => {
+    reads++;
+    return { input: null, output: null };
+  });
+  assert.equal(reads, 0);
+  assert.deepEqual(result, status);
+});
+
+test("the formats read is cached, shared while in flight, and dropped on invalidation", async () => {
+  invalidateHiFiCableFormatsCache();
+  const f48 = { sampleRate: 48000, bitsPerSample: 24, channels: 2 };
+  let reads = 0;
+  let clock = 1_000;
+  const now = () => clock;
+  const read = async () => {
+    reads++;
+    return { input: f48, output: f48 };
+  };
+
+  const [a, b] = await Promise.all([readHiFiCableFormatsCached(read, now), readHiFiCableFormatsCached(read, now)]);
+  assert.equal(reads, 1);
+  assert.deepEqual(a, b);
+
+  clock += 29_000;
+  await readHiFiCableFormatsCached(read, now);
+  assert.equal(reads, 1);
+
+  clock += 2_000;
+  await readHiFiCableFormatsCached(read, now);
+  assert.equal(reads, 2);
+
+  invalidateHiFiCableFormatsCache();
+  await readHiFiCableFormatsCached(read, now);
+  assert.equal(reads, 3);
+
+  // A read that began before an invalidation does not repopulate the cache.
+  invalidateHiFiCableFormatsCache();
+  let release;
+  const slow = readHiFiCableFormatsCached(() => new Promise((resolve) => (release = resolve)), now);
+  invalidateHiFiCableFormatsCache();
+  release({ input: null, output: null });
+  await slow;
+  await readHiFiCableFormatsCached(read, now);
+  assert.equal(reads, 4);
+
+  // A failure is not cached.
+  invalidateHiFiCableFormatsCache();
+  await assert.rejects(readHiFiCableFormatsCached(async () => { throw new Error("boom"); }, now));
+  await readHiFiCableFormatsCached(read, now);
+  assert.equal(reads, 5);
+  invalidateHiFiCableFormatsCache();
 });
