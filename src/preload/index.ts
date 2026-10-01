@@ -8,6 +8,9 @@ import { contextBridge, ipcRenderer } from "electron";
 
 import type {
   DesktopRuntimeCapability,
+  EnsureMeetCaptionsResult,
+  MeetCaptionEvent,
+  MeetCaptionStatus,
   HiFiFormatAlignResult,
   MeetPresence,
   WindowsLoopbackPcmChunk,
@@ -96,6 +99,22 @@ contextBridge.exposeInMainWorld("warptalk", {
   // Optional on the web side. Never reporting leaves the session "unknown" to main.
   reportSignedIn: (signedIn: boolean): Promise<void> =>
     ipcRenderer.invoke("auth:signed-in-state", { signedIn }),
+
+  // Speaker names from Meet's captions. See meet-captions.ts.
+  onMeetCaption: (callback: (event: MeetCaptionEvent) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, event: MeetCaptionEvent) => callback(event);
+    ipcRenderer.on("bridge:meet-caption", listener);
+    return () => ipcRenderer.off("bridge:meet-caption", listener);
+  },
+  onMeetCaptionStatus: (callback: (status: MeetCaptionStatus) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, status: MeetCaptionStatus) => callback(status);
+    ipcRenderer.on("bridge:meet-caption-status", listener);
+    return () => ipcRenderer.off("bridge:meet-caption-status", listener);
+  },
+  setMeetCaptionsStream: (meetCode: string, enabled: boolean): Promise<void> =>
+    ipcRenderer.invoke("bridge:meet-captions-stream", { meetCode, enabled }),
+  ensureMeetCaptions: (meetCode: string): Promise<EnsureMeetCaptionsResult> =>
+    ipcRenderer.invoke("bridge:ensure-meet-captions", { meetCode }),
 
   minimize: (): void => ipcRenderer.send("window:minimize"),
   maximize: (): void => ipcRenderer.send("window:maximize"),
