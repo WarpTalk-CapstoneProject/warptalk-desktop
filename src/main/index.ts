@@ -31,6 +31,7 @@ import { MeetPresenceWatcher } from "./meet-presence";
 import { MeetUrlSensor } from "./meet-url-sensor";
 import { MacMeetUrlSensor } from "./meet-url-sensor-mac";
 import { MeetCaptionSensor } from "./meet-caption-sensor";
+import { MeetCaptionBuffer } from "./meet-caption-buffer";
 import {
   MEET_CODE,
   MeetCaptionStream,
@@ -157,16 +158,23 @@ const bridgeMeetCaptionNames =
   process.platform === "win32" &&
   meetCaptionNamesEnabled(process.env.WARPTALK_BRIDGE_MEET_CAPTION_NAMES, app.isPackaged);
 const meetCaptionSensor = new MeetCaptionSensor();
+// Events go through a 30 s buffer while the main window's renderer is not subscribed (loading,
+// reloading, or not yet asked for the stream); see meet-caption-buffer.ts.
+const meetCaptionBuffer = new MeetCaptionBuffer({
+  now: alignedNow,
+  send: (event) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("bridge:meet-caption", event);
+  },
+  sendStatus: (status) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("bridge:meet-caption-status", status);
+  },
+});
 const meetCaptionStream = new MeetCaptionStream({
   sensor: meetCaptionSensor,
   now: alignedNow,
   audioActive: () => loopbackCapturing,
-  emit: (event) => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("bridge:meet-caption", event);
-  },
-  emitStatus: (status) => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("bridge:meet-caption-status", status);
-  },
+  emit: (event) => meetCaptionBuffer.event(event),
+  emitStatus: (status) => meetCaptionBuffer.status(status),
 });
 const ensureMeetCaptionsOnce = singleFlight((meetCode) => ensureCaptionsOn(meetCaptionSensor, meetCode));
 
@@ -278,15 +286,24 @@ function registerIpcHandlers(): void {
       if (!meetCaptionStream.activeMeetCode) meetCaptionSensor.stop();
     }
   });
-  ipcMain.handle("bridge:meet-captions-stream", (_event, request: unknown) => {
+  ipcMain.handle("bridge:meet-captions-stream", (event, request: unknown) => {
     if (!bridgeMeetCaptionNames) return;
     const enabled = (request as { enabled?: unknown } | null)?.enabled === true;
     const meetCode = meetCodeFrom(request);
+    // Only the main window carries the hub connection the hints travel on.
+    const fromMainWindow = mainWindow !== null && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents;
     if (enabled && meetCode) {
+      // A renderer that reloaded asks again for the same meeting: `start` is then a no-op and the
+      // subscribe below hands over what was read while it was away.
+      if (meetCaptionStream.activeMeetCode !== meetCode) meetCaptionBuffer.clear();
       meetCaptionStream.start(meetCode);
+      if (fromMainWindow) meetCaptionBuffer.subscribe(meetCode);
     } else if (!meetCode || meetCaptionStream.activeMeetCode === meetCode) {
+      // Stop first: its final flush still reaches the subscribed renderer.
       meetCaptionStream.stop();
       meetCaptionSensor.stop();
+      meetCaptionBuffer.unsubscribe();
+      meetCaptionBuffer.clear();
     }
   });
   ipcMain.handle("translationRoom:join", async () => undefined);
@@ -421,6 +438,10 @@ async function createWindow(): Promise<void> {
        * most aggressive tiers, the exemption is a heuristic about playback rather than a guarantee
        * for a page assembling audio buffer by buffer. Paying full timer resolution for the length
        * of a meeting is the right trade against a translation that arrives late in bursts.
+       *
+       * The same holds for Meet caption hints: this renderer batches them onto the hub on a timer
+       * (every few hundred ms), and a throttled timer in a hidden window would hold speaker names
+       * back until they no longer match the speech they belong to.
        */
       backgroundThrottling: false,
       preload: path.join(__dirname, "../preload/index.js"),
@@ -442,6 +463,7 @@ async function createWindow(): Promise<void> {
   win.on("closed", () => {
     if (mainWindow === win) {
       mainWindow = null;
+      meetCaptionBuffer.unsubscribe();
     }
   });
 
@@ -454,8 +476,13 @@ async function createWindow(): Promise<void> {
   // web app to arm the sensor runs from the end of each load. Same-document navigations are the
   // SPA moving around and change nothing.
   win.webContents.on("did-start-navigation", (details) => {
-    if (details.isMainFrame && !details.isSameDocument) signedOutMeetPrompt.pageLoadStarted();
+    if (details.isMainFrame && !details.isSameDocument) {
+      signedOutMeetPrompt.pageLoadStarted();
+      // The new page has no caption listener until it asks for the stream again.
+      meetCaptionBuffer.unsubscribe();
+    }
   });
+  win.webContents.on("render-process-gone", () => meetCaptionBuffer.unsubscribe());
   win.webContents.on("did-finish-load", () => signedOutMeetPrompt.pageLoaded());
 
   // Minimize to tray instead of closing - except while quitting, when cancelling the close would
