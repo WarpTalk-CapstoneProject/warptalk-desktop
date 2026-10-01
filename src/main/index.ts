@@ -40,6 +40,7 @@ import {
   meetCaptionNamesEnabled,
   singleFlight,
 } from "./meet-captions";
+import { MeetMicStateStream, MicSessionSensor } from "./meet-mic-state";
 import { TranscriptPanelLedger } from "./transcript-panel";
 import { SignedOutMeetPrompt } from "./signed-out-meet-prompt";
 import { trayMenuTemplate } from "./tray-menu";
@@ -53,7 +54,7 @@ import {
 } from "./updater";
 import { trayBadged, trayTooltip, trayUpdateLabel } from "./update-policy";
 import { withUpdateDot } from "./tray-badge";
-import type { EnsureMeetCaptionsResult, MeetPresence } from "../shared/types";
+import type { EnsureMeetCaptionsResult, MeetMicState, MeetPresence } from "../shared/types";
 import {
   describeWindowsLoopbackSources,
   resolveWindowOwnerProcessId,
@@ -177,6 +178,38 @@ const meetCaptionStream = new MeetCaptionStream({
   emitStatus: (status) => meetCaptionBuffer.status(status),
 });
 const ensureMeetCaptionsOnce = singleFlight((meetCode) => ensureCaptionsOn(meetCaptionSensor, meetCode));
+
+/**
+ * Which microphone the Meet browser records from, for the Text -> Voice notice (meet-mic-state.ts).
+ * Windows only, read-only. Polled only while at least one window is subscribed; every subscriber
+ * (main window, bridge popup) gets the events, and the helper is killed when the last one leaves.
+ */
+const meetMicSubscribers = new Map<Electron.WebContents, () => void>();
+/** A browser PID a subscriber named explicitly; otherwise the loopback capture's target is used. */
+let meetMicBrowserPid: number | null = null;
+const meetMicStream = new MeetMicStateStream({
+  sensor: new MicSessionSensor(),
+  browserPid: () => meetMicBrowserPid ?? windowsLoopbackRuntime.activeTargetProcessId,
+  // Our own tree is excluded by ancestry anyway; the metrics list also covers any helper Electron
+  // reparented.
+  excludePids: () => [process.pid, ...app.getAppMetrics().map((metric) => metric.pid)],
+  emit: (state) => sendMeetMicState(state),
+});
+
+function sendMeetMicState(state: MeetMicState, only?: Electron.WebContents): void {
+  for (const contents of only ? [only] : meetMicSubscribers.keys()) {
+    if (!contents.isDestroyed()) contents.send("bridge:meet-mic-state", state);
+  }
+}
+
+function unsubscribeMeetMic(contents: Electron.WebContents): void {
+  meetMicSubscribers.get(contents)?.();
+  meetMicSubscribers.delete(contents);
+  if (meetMicSubscribers.size === 0) {
+    meetMicStream.stop();
+    meetMicBrowserPid = null;
+  }
+}
 
 function meetCodeFrom(request: unknown): string | null {
   const code = typeof request === "string" ? request : (request as { meetCode?: unknown } | null)?.meetCode;
@@ -304,6 +337,42 @@ function registerIpcHandlers(): void {
       meetCaptionSensor.stop();
       meetCaptionBuffer.unsubscribe();
       meetCaptionBuffer.clear();
+    }
+  });
+  ipcMain.handle("bridge:meet-mic-state-stream", (event, request: unknown) => {
+    const contents = event.sender;
+    const options = (request ?? {}) as { enabled?: unknown; browserPid?: unknown };
+    if (options.enabled !== true) {
+      unsubscribeMeetMic(contents);
+      return;
+    }
+    if (process.platform !== "win32") {
+      sendMeetMicState({ state: "unknown", reason: "unsupported-platform", at: Date.now() }, contents);
+      return;
+    }
+    const pid = options.browserPid;
+    if (typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid) {
+      meetMicBrowserPid = pid;
+    }
+    if (!meetMicSubscribers.has(contents)) {
+      // A page that went away (closed, crashed, navigated to another document) stops counting as a
+      // subscriber; one that comes back asks again. In-page (SPA) navigations keep it.
+      const leave = () => unsubscribeMeetMic(contents);
+      contents.once("destroyed", leave);
+      contents.on("render-process-gone", leave);
+      contents.on("did-navigate", leave);
+      meetMicSubscribers.set(contents, () => {
+        contents.off("destroyed", leave);
+        contents.off("render-process-gone", leave);
+        contents.off("did-navigate", leave);
+      });
+    }
+    if (meetMicStream.isRunning) {
+      // A second subscriber, or a renderer that reloaded: hand it the current answer now.
+      const current = meetMicStream.current;
+      if (current) sendMeetMicState(current, contents);
+    } else {
+      meetMicStream.start();
     }
   });
   ipcMain.handle("translationRoom:join", async () => undefined);
@@ -1412,6 +1481,8 @@ if (!app.requestSingleInstanceLock()) {
     meetUrlSensor.stop();
     meetCaptionStream.stop();
     meetCaptionSensor.stop();
+    for (const contents of [...meetMicSubscribers.keys()]) unsubscribeMeetMic(contents);
+    meetMicStream.stop();
     void windowsLoopbackRuntime.stop();
   });
 

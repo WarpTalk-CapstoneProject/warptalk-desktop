@@ -201,7 +201,19 @@ export function evaluateWindowsLoopbackStart(
   request: WindowsLoopbackCaptureRequest,
 ): WindowsLoopbackStartResult {
   if (status.platform !== "win32") return missing("X1", "unsupported-platform");
-  if (!status.devices.some((device) => device.providerId === "vbcable-free" && device.installed)) {
+  /**
+   * VB-CABLE is a voice-mode requirement, not a loopback one.
+   *
+   * Loopback reads the browser's render stream and needs no cable at all; the cable is where the
+   * DUB leaves for Meet. Text-only mode never dubs — Meet keeps the real microphone and speakers —
+   * so it is asked for explicitly and skips only this gate. Every other gate below (consent, PID,
+   * process tree, never-ourselves, adapter readiness) holds for it exactly as for voice. A request
+   * that does not say "text-only" is voice, so older renderers keep the old requirement.
+   */
+  if (
+    request.mode !== "text-only" &&
+    !status.devices.some((device) => device.providerId === "vbcable-free" && device.installed)
+  ) {
     return missing("B2", "driver-missing");
   }
   if (!status.capabilities?.processLoopback) {
@@ -248,6 +260,18 @@ export function evaluateWindowsLoopbackStart(
 export class WindowsLoopbackRuntime {
   private adapter: WindowsLoopbackRuntimeAdapter;
   private statusProvider: () => VirtualAudioStatus;
+  private targetProcessId: number | null = null;
+  private captureMode: "voice" | "text-only" | null = null;
+
+  /** The browser process being captured, or null while nothing is. The Meet mic detector reads it. */
+  get activeTargetProcessId(): number | null {
+    return this.targetProcessId;
+  }
+
+  /** The mode the running capture was started in, or null while nothing is captured. */
+  get activeMode(): "voice" | "text-only" | null {
+    return this.captureMode;
+  }
 
   constructor(
     adapter: WindowsLoopbackRuntimeAdapter = MISSING_RUNTIME_ADAPTER,
@@ -292,10 +316,14 @@ export class WindowsLoopbackRuntime {
     } catch {
       return missing("R2", "native-loopback-adapter-unavailable");
     }
+    this.targetProcessId = resolvedRequest.targetProcessId!;
+    this.captureMode = resolvedRequest.mode === "text-only" ? "text-only" : "voice";
     return { started: true };
   }
 
   async stop(): Promise<void> {
+    this.targetProcessId = null;
+    this.captureMode = null;
     await this.adapter.stop();
   }
 

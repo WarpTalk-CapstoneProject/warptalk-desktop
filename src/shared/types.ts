@@ -61,6 +61,15 @@ export interface WarpTalkAPI {
    * button, never focus or keys, never off. `ok:false` means ask the host to turn CC on manually.
    */
   ensureMeetCaptions?: (meetCode: string) => Promise<EnsureMeetCaptionsResult>;
+  /**
+   * Which microphone Google Meet's browser is capturing from (Windows only), for the Text -> Voice
+   * notice "set Meet's microphone to CABLE Output". Polled about every 2 s while enabled; events
+   * arrive on `onMeetMicState` when the answer changes. `browserPid` defaults to the browser the
+   * loopback capture targets. Read-only: nothing here changes Meet's or Windows' devices. Absent on
+   * desktop builds that predate it.
+   */
+  setMeetMicStream?: (enabled: boolean, options?: { browserPid?: number }) => Promise<void>;
+  onMeetMicState?: (callback: (state: MeetMicState) => void) => () => void;
   minimize: () => void;
   maximize: () => void;
   close: () => void;
@@ -105,6 +114,27 @@ export interface VirtualAudioStatus {
   hifiFormat?: HiFiCableFormats;
   /** The two sides differ in sample rate or bit depth, so the inbound cable passes no sound. */
   hifiFormatMismatch?: boolean;
+  /**
+   * Which bridge modes are possible now. Absent on desktop builds that predate text-only mode,
+   * which means only voice mode exists. `bridgeMode` keeps describing voice mode.
+   *   textOnly.possible            loopback works; no cable needed (real mic + speakers in Meet)
+   *   voice.possible               VB-CABLE installed and the far side can come back
+   *   voice.cableInstalled=false   voice is not possible until VB-CABLE is installed
+   */
+  bridgeModes?: BridgeModeAvailability;
+}
+
+export interface BridgeModeAvailability {
+  textOnly: {
+    possible: boolean;
+    reason?: "unsupported-platform" | "process-loopback-unsupported" | "loopback-runtime-not-wired";
+  };
+  voice: {
+    possible: boolean;
+    cableInstalled: boolean;
+    inbound?: "hifi-cable" | "process-loopback" | "virtual-device";
+    reason?: "unsupported-platform" | "cable-missing" | "inbound-unavailable";
+  };
 }
 
 export interface EndpointFormat {
@@ -148,6 +178,11 @@ export interface WindowsLoopbackCaptureRequest {
   includeTargetProcessTree?: boolean;
   /** Set only after the user picked the meeting window and accepted scoped audio capture. */
   consentGranted?: boolean;
+  /**
+   * "text-only": Meet uses the real mic and speakers, nothing is dubbed, so no VB-CABLE is needed.
+   * Absent or "voice": the old contract, which requires VB-CABLE (B2 driver-missing without it).
+   */
+  mode?: "voice" | "text-only";
 }
 
 export type WindowsLoopbackStartResult =
@@ -248,6 +283,32 @@ export interface EnsureMeetCaptionsResult {
    * "meet-tab-not-found", "verify-button-not-flipped", "disabled", "unsupported-platform".
    */
   reason?: string;
+}
+
+/**
+ * Which capture endpoint the meeting browser is actively recording from, read from Windows Core
+ * Audio sessions. Per BROWSER, not per tab: another tab of the same browser that records the mic
+ * (WarpTalk web itself, for one) counts too.
+ *   cable      an active session on "CABLE Output (VB-Audio Virtual Cable)" only
+ *   real       active session(s) on physical microphones only
+ *   ambiguous  active sessions on the cable AND on another endpoint
+ *   unknown    no active session (Meet not capturing, possibly muted), or the probe failed
+ */
+export interface MeetMicState {
+  state: "cable" | "real" | "unknown" | "ambiguous";
+  /** The browser process the answer is about, when one was identified. */
+  browserPid?: number;
+  /** Friendly name of the endpoint, for `cable` and `real`. */
+  endpoint?: string;
+  /** Every endpoint with an active browser session, for `ambiguous` and diagnostics. */
+  endpoints?: string[];
+  reason?:
+    | "no-active-session"
+    | "other-virtual-device"
+    | "probe-failed"
+    | "unsupported-platform";
+  /** Date.now() of the read. */
+  at: number;
 }
 
 export interface WindowsLoopbackPcmChunk {

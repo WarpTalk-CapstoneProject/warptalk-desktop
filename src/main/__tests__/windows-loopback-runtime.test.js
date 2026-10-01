@@ -438,3 +438,63 @@ test("a non-Windows native adapter never attempts the import", async () => {
   assert.equal(imports, 0);
   assert.equal(adapter.electronLoopbackApiReady, false);
 });
+
+test("text-only mode starts loopback without VB-CABLE", () => {
+  const result = evaluateWindowsLoopbackStart(
+    readyStatus({ devices: [] }),
+    readyAdapter(),
+    { ...READY_REQUEST, mode: "text-only" },
+  );
+
+  assert.deepEqual(result, { started: true });
+});
+
+test("voice mode, said or implied, still requires VB-CABLE", () => {
+  for (const request of [READY_REQUEST, { ...READY_REQUEST, mode: "voice" }]) {
+    assert.deepEqual(
+      evaluateWindowsLoopbackStart(readyStatus({ devices: [] }), readyAdapter(), request),
+      { started: false, riskId: "B2", reason: "driver-missing" },
+    );
+  }
+});
+
+test("text-only mode keeps every other gate", () => {
+  const textOnly = { ...READY_REQUEST, mode: "text-only" };
+  const noCable = readyStatus({ devices: [] });
+  assert.equal(
+    evaluateWindowsLoopbackStart(noCable, readyAdapter(), { ...textOnly, consentGranted: false }).reason,
+    "consent-required",
+  );
+  assert.equal(
+    evaluateWindowsLoopbackStart(noCable, readyAdapter(), { ...textOnly, includeTargetProcessTree: false }).reason,
+    "include-target-tree-required",
+  );
+  assert.equal(
+    evaluateWindowsLoopbackStart(noCable, readyAdapter(), { ...textOnly, targetProcessId: process.pid }).reason,
+    "target-is-warptalk",
+  );
+  assert.equal(
+    evaluateWindowsLoopbackStart(
+      readyStatus({ devices: [], capabilities: { ...readyStatus().capabilities, processLoopback: false } }),
+      readyAdapter(),
+      textOnly,
+    ).reason,
+    "process-loopback-unsupported",
+  );
+  assert.equal(
+    evaluateWindowsLoopbackStart(noCable, readyAdapter({ electronLoopbackApiReady: false }), textOnly).reason,
+    "electron-loopback-api-not-ready",
+  );
+});
+
+test("the runtime remembers the captured browser and mode until stopped", async () => {
+  const runtime = new WindowsLoopbackRuntime(readyAdapter(), () => readyStatus({ devices: [] }));
+  assert.equal(runtime.activeTargetProcessId, null);
+  const result = await runtime.start({ ...READY_REQUEST, mode: "text-only" });
+  assert.deepEqual(result, { started: true });
+  assert.equal(runtime.activeTargetProcessId, 4242);
+  assert.equal(runtime.activeMode, "text-only");
+  await runtime.stop();
+  assert.equal(runtime.activeTargetProcessId, null);
+  assert.equal(runtime.activeMode, null);
+});

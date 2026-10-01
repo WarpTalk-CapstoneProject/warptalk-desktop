@@ -11,6 +11,7 @@ import type {
   EnsureMeetCaptionsResult,
   MeetCaptionEvent,
   MeetCaptionStatus,
+  MeetMicState,
   HiFiFormatAlignResult,
   MeetPresence,
   WindowsLoopbackPcmChunk,
@@ -115,6 +116,15 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.invoke("bridge:meet-captions-stream", { meetCode, enabled }),
   ensureMeetCaptions: (meetCode: string): Promise<EnsureMeetCaptionsResult> =>
     ipcRenderer.invoke("bridge:ensure-meet-captions", { meetCode }),
+
+  // Which mic Meet's browser records from (CABLE Output vs a real mic). See meet-mic-state.ts.
+  setMeetMicStream: (enabled: boolean, options?: { browserPid?: number }): Promise<void> =>
+    ipcRenderer.invoke("bridge:meet-mic-state-stream", { enabled, browserPid: options?.browserPid }),
+  onMeetMicState: (callback: (state: MeetMicState) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: MeetMicState) => callback(state);
+    ipcRenderer.on("bridge:meet-mic-state", listener);
+    return () => ipcRenderer.off("bridge:meet-mic-state", listener);
+  },
 
   minimize: (): void => ipcRenderer.send("window:minimize"),
   maximize: (): void => ipcRenderer.send("window:maximize"),
