@@ -30,7 +30,19 @@ import {
 import { MeetPresenceWatcher } from "./meet-presence";
 import { MeetUrlSensor } from "./meet-url-sensor";
 import { MacMeetUrlSensor } from "./meet-url-sensor-mac";
+import { MeetCaptionSensor } from "./meet-caption-sensor";
+import { MeetCaptionBuffer } from "./meet-caption-buffer";
+import {
+  MEET_CODE,
+  MeetCaptionStream,
+  alignedNow,
+  ensureCaptionsOn,
+  meetCaptionNamesEnabled,
+  singleFlight,
+} from "./meet-captions";
+import { MeetMicStateStream, MicSessionSensor } from "./meet-mic-state";
 import { TranscriptPanelLedger } from "./transcript-panel";
+import { SignedOutMeetPrompt } from "./signed-out-meet-prompt";
 import { trayMenuTemplate } from "./tray-menu";
 import { shouldHideOnClose, shouldIgnoreBeforeUnload } from "./quit-lifecycle";
 import {
@@ -42,7 +54,7 @@ import {
 } from "./updater";
 import { trayBadged, trayTooltip, trayUpdateLabel } from "./update-policy";
 import { withUpdateDot } from "./tray-badge";
-import type { MeetPresence } from "../shared/types";
+import type { EnsureMeetCaptionsResult, MeetMicState, MeetPresence } from "../shared/types";
 import {
   describeWindowsLoopbackSources,
   resolveWindowOwnerProcessId,
@@ -53,11 +65,16 @@ import {
   MAC_BUNDLED_DRIVERS,
   VBCABLE_DOWNLOAD_PAGE,
   buildMacDriverInstallScript,
-  detectVirtualAudio,
+  detectVirtualAudioWithFormats,
   hasHomebrew,
   toAppleScriptAdminCommand,
 } from "./virtual-audio";
 import { WebRuntimeService } from "./web-runtime";
+import {
+  alignHiFiCableFormat,
+  isHiFiFormatMismatch,
+  readHiFiCableFormats,
+} from "./audio-device-format";
 import {
   PLUGIN_CONNECT_SCHEME,
   firstPluginConnectLink,
@@ -87,9 +104,10 @@ const audioRuntime = new AudioRuntimeService();
  * Watches for a Google Meet window so the bridge widget can appear when the user is actually in
  * the call, rather than when they happen to open the room in WarpTalk.
  *
- * Armed by the renderer and only by the renderer: enumerating every window on the machine is not
- * something to do on the chance a meeting might start. The renderer knows when a bridge meeting is
- * near; main does not, and giving main that knowledge would mean giving it the API session too.
+ * Armed by the renderer's bridge trigger, which knows when a bridge meeting is near; main does not,
+ * and giving main that knowledge would mean giving it the API session too. The one exception is a
+ * signed-out app, where that trigger never mounts: main then arms it itself, only to offer a
+ * sign-in. See signed-out-meet-prompt.ts.
  *
  * The sensor reads the browser's own URL rather than the window title. A title is written by the
  * page and so is worthless as a trust boundary; an address is not. See meet-url-sensor.ts.
@@ -108,7 +126,19 @@ const meetPresenceWatcher = new MeetPresenceWatcher({
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("bridge:meet-presence", presence);
     }
+    signedOutMeetPrompt.presence(presence);
   },
+});
+
+/** Main's own use of the watcher while nobody is signed in. See signed-out-meet-prompt.ts. */
+const signedOutMeetPrompt = new SignedOutMeetPrompt({
+  armWatcher: () => meetPresenceWatcher.arm(),
+  disarmWatcher: () => {
+    meetPresenceWatcher.disarm();
+    // Same as the web app's disarm: the helper shell would otherwise outlive the watch.
+    meetUrlSensor.stop();
+  },
+  notify: () => announceSignInForMeet(),
 });
 const windowsLoopbackRuntime = new WindowsLoopbackRuntime(
   createNativeWindowsLoopbackAdapter({
@@ -119,6 +149,72 @@ const windowsLoopbackRuntime = new WindowsLoopbackRuntime(
   }),
 );
 const webRuntime = new WebRuntimeService();
+
+/**
+ * Speaker names from Google Meet's own captions (see meet-captions.ts). Windows only; behind the
+ * `bridgeMeetCaptionNames` flag (env WARPTALK_BRIDGE_MEET_CAPTION_NAMES, default on in dev).
+ * The helper is a PowerShell process of its own, started on first use and stopped with the stream.
+ */
+const bridgeMeetCaptionNames =
+  process.platform === "win32" &&
+  meetCaptionNamesEnabled(process.env.WARPTALK_BRIDGE_MEET_CAPTION_NAMES, app.isPackaged);
+const meetCaptionSensor = new MeetCaptionSensor();
+// Events go through a 30 s buffer while the main window's renderer is not subscribed (loading,
+// reloading, or not yet asked for the stream); see meet-caption-buffer.ts.
+const meetCaptionBuffer = new MeetCaptionBuffer({
+  now: alignedNow,
+  send: (event) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("bridge:meet-caption", event);
+  },
+  sendStatus: (status) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("bridge:meet-caption-status", status);
+  },
+});
+const meetCaptionStream = new MeetCaptionStream({
+  sensor: meetCaptionSensor,
+  now: alignedNow,
+  audioActive: () => loopbackCapturing,
+  emit: (event) => meetCaptionBuffer.event(event),
+  emitStatus: (status) => meetCaptionBuffer.status(status),
+});
+const ensureMeetCaptionsOnce = singleFlight((meetCode) => ensureCaptionsOn(meetCaptionSensor, meetCode));
+
+/**
+ * Which microphone the Meet browser records from, for the Text -> Voice notice (meet-mic-state.ts).
+ * Windows only, read-only. Polled only while at least one window is subscribed; every subscriber
+ * (main window, bridge popup) gets the events, and the helper is killed when the last one leaves.
+ */
+const meetMicSubscribers = new Map<Electron.WebContents, () => void>();
+/** A browser PID a subscriber named explicitly; otherwise the loopback capture's target is used. */
+let meetMicBrowserPid: number | null = null;
+const meetMicStream = new MeetMicStateStream({
+  sensor: new MicSessionSensor(),
+  browserPid: () => meetMicBrowserPid ?? windowsLoopbackRuntime.activeTargetProcessId,
+  // Our own tree is excluded by ancestry anyway; the metrics list also covers any helper Electron
+  // reparented.
+  excludePids: () => [process.pid, ...app.getAppMetrics().map((metric) => metric.pid)],
+  emit: (state) => sendMeetMicState(state),
+});
+
+function sendMeetMicState(state: MeetMicState, only?: Electron.WebContents): void {
+  for (const contents of only ? [only] : meetMicSubscribers.keys()) {
+    if (!contents.isDestroyed()) contents.send("bridge:meet-mic-state", state);
+  }
+}
+
+function unsubscribeMeetMic(contents: Electron.WebContents): void {
+  meetMicSubscribers.get(contents)?.();
+  meetMicSubscribers.delete(contents);
+  if (meetMicSubscribers.size === 0) {
+    meetMicStream.stop();
+    meetMicBrowserPid = null;
+  }
+}
+
+function meetCodeFrom(request: unknown): string | null {
+  const code = typeof request === "string" ? request : (request as { meetCode?: unknown } | null)?.meetCode;
+  return typeof code === "string" && MEET_CODE.test(code) ? code : null;
+}
 const APP_NAME = "WarpTalk";
 const APP_MODEL_ID = "com.warptalk.desktop";
 const WINDOW_TITLE = "";
@@ -169,12 +265,21 @@ function registerIpcHandlers(): void {
   // the OS, and two loops out of step is how a widget ends up a few seconds behind the meeting.
   ipcMain.handle("bridge:watch-meet-presence", () => {
     meetPresenceWatcher.arm();
+    signedOutMeetPrompt.webArmedWatcher();
   });
   ipcMain.handle("bridge:unwatch-meet-presence", () => {
     meetPresenceWatcher.disarm();
     // The helper is one long-lived shell. Disarming without killing it would leave a PowerShell
     // process alive for the rest of the session, polling nothing.
     meetUrlSensor.stop();
+    signedOutMeetPrompt.webDisarmedWatcher();
+  });
+  // Whether anyone is signed in to the web app. Optional on the web side: a web app that never
+  // sends it is "unknown", which prompts only after the grace period passes without an arm.
+  ipcMain.handle("auth:signed-in-state", (_event, state: unknown) => {
+    const signedIn = (state as { signedIn?: unknown } | null)?.signedIn;
+    if (typeof signedIn !== "boolean") return;
+    signedOutMeetPrompt.reportSignedIn(signedIn);
   });
   ipcMain.handle("audio:list-loopback-sources", async () => {
     if (process.platform !== "win32") return [];
@@ -196,6 +301,80 @@ function registerIpcHandlers(): void {
     const described = await describeWindowsLoopbackSources(sources);
     return described.filter((source) => source.ownerProcessId !== process.pid);
   });
+  // Meet captions -> live speaker names. `ensure` turns CC on via Meet's own button (never off,
+  // never focus or keys); `stream` reads the captions while the bridge translates.
+  ipcMain.handle("bridge:ensure-meet-captions", async (_event, request: unknown): Promise<EnsureMeetCaptionsResult> => {
+    if (process.platform !== "win32") return { ok: false, state: "unknown", reason: "unsupported-platform" };
+    if (!bridgeMeetCaptionNames) return { ok: false, state: "unknown", reason: "disabled" };
+    const meetCode = meetCodeFrom(request);
+    if (!meetCode) return { ok: false, state: "unknown", reason: "invalid-meet-code" };
+    try {
+      const result = await ensureMeetCaptionsOnce(meetCode);
+      console.log("Meet captions ensure:", JSON.stringify(result));
+      return result;
+    } catch (error) {
+      return { ok: false, state: "unknown", reason: error instanceof Error ? error.message : String(error) };
+    } finally {
+      // Nothing else needs the helper: do not leave a PowerShell running for the session.
+      if (!meetCaptionStream.activeMeetCode) meetCaptionSensor.stop();
+    }
+  });
+  ipcMain.handle("bridge:meet-captions-stream", (event, request: unknown) => {
+    if (!bridgeMeetCaptionNames) return;
+    const enabled = (request as { enabled?: unknown } | null)?.enabled === true;
+    const meetCode = meetCodeFrom(request);
+    // Only the main window carries the hub connection the hints travel on.
+    const fromMainWindow = mainWindow !== null && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents;
+    if (enabled && meetCode) {
+      // A renderer that reloaded asks again for the same meeting: `start` is then a no-op and the
+      // subscribe below hands over what was read while it was away.
+      if (meetCaptionStream.activeMeetCode !== meetCode) meetCaptionBuffer.clear();
+      meetCaptionStream.start(meetCode);
+      if (fromMainWindow) meetCaptionBuffer.subscribe(meetCode);
+    } else if (!meetCode || meetCaptionStream.activeMeetCode === meetCode) {
+      // Stop first: its final flush still reaches the subscribed renderer.
+      meetCaptionStream.stop();
+      meetCaptionSensor.stop();
+      meetCaptionBuffer.unsubscribe();
+      meetCaptionBuffer.clear();
+    }
+  });
+  ipcMain.handle("bridge:meet-mic-state-stream", (event, request: unknown) => {
+    const contents = event.sender;
+    const options = (request ?? {}) as { enabled?: unknown; browserPid?: unknown };
+    if (options.enabled !== true) {
+      unsubscribeMeetMic(contents);
+      return;
+    }
+    if (process.platform !== "win32") {
+      sendMeetMicState({ state: "unknown", reason: "unsupported-platform", at: Date.now() }, contents);
+      return;
+    }
+    const pid = options.browserPid;
+    if (typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid) {
+      meetMicBrowserPid = pid;
+    }
+    if (!meetMicSubscribers.has(contents)) {
+      // A page that went away (closed, crashed, navigated to another document) stops counting as a
+      // subscriber; one that comes back asks again. In-page (SPA) navigations keep it.
+      const leave = () => unsubscribeMeetMic(contents);
+      contents.once("destroyed", leave);
+      contents.on("render-process-gone", leave);
+      contents.on("did-navigate", leave);
+      meetMicSubscribers.set(contents, () => {
+        contents.off("destroyed", leave);
+        contents.off("render-process-gone", leave);
+        contents.off("did-navigate", leave);
+      });
+    }
+    if (meetMicStream.isRunning) {
+      // A second subscriber, or a renderer that reloaded: hand it the current answer now.
+      const current = meetMicStream.current;
+      if (current) sendMeetMicState(current, contents);
+    } else {
+      meetMicStream.start();
+    }
+  });
   ipcMain.handle("translationRoom:join", async () => undefined);
   ipcMain.handle("translationRoom:leave", async () => undefined);
 
@@ -209,16 +388,26 @@ function registerIpcHandlers(): void {
   // tier picker reads exactly this field to decide whether the loopback rung is on offer.
   ipcMain.handle("bridge:virtual-audio-status", async () => {
     await windowsLoopbackRuntime.whenProbed();
-    return detectVirtualAudio(windowsLoopbackRuntime.isReady());
+    return detectVirtualAudioWithFormats(windowsLoopbackRuntime.isReady());
   });
   ipcMain.handle("bridge:install-virtual-audio", () => runVirtualAudioInstaller());
-  ipcMain.handle("bridge:open-transcript-window", async (_event, roomId: string | null) => {
-    transcriptPanel.request(roomId ?? null);
+  // Single-flight inside alignHiFiCableFormat: a click while the startup align is still running
+  // joins that attempt instead of starting a second one on the same endpoints.
+  ipcMain.handle("bridge:align-hifi-format", async () => {
+    const result = await alignHiFiCableFormat();
+    console.log("Hi-Fi Cable format alignment:", JSON.stringify(result));
+    return result;
+  });
+  ipcMain.handle("bridge:open-transcript-window", async (_event, roomId: unknown) => {
+    // Only a real room has a popup. The roomless "offer" it once also opened is gone from the web
+    // app (web #505); a stale caller asking for it gets nothing rather than a 404 in a window.
+    if (typeof roomId !== "string" || roomId.length === 0) return;
+    transcriptPanel.request(roomId);
     refreshTrayMenu();
-    await openTranscriptWindow(roomId ?? null);
+    await openTranscriptWindow(roomId);
   });
   /**
-   * Flow 2's last mile: the offer window has made a room, and the SESSION has to start.
+   * The popup asks for the room's session to start.
    *
    * It cannot start it itself. The translation pipeline lives in the main window's meeting
    * session, keyed off a store held in sessionStorage - which is per-window, so nothing the
@@ -235,6 +424,17 @@ function registerIpcHandlers(): void {
     const win = transcriptPanel.withdraw();
     refreshTrayMenu();
     if (win && !win.isDestroyed()) win.close();
+  });
+  /**
+   * Brings the main window forward - from the tray, minimized, or behind the browser.
+   *
+   * The popup has no End meeting: a bridge meeting ends when the Google Meet call does. When the
+   * web app learns the room ended it navigates the main window to the room itself and calls this,
+   * so the user lands on the record as they would after a native meeting. The popup is left alone;
+   * what it shows next is the web app's call.
+   */
+  ipcMain.handle("bridge:show-main-window", () => {
+    revealMainWindow();
   });
 
   ipcMain.on("window:minimize", () => mainWindow?.minimize());
@@ -307,6 +507,10 @@ async function createWindow(): Promise<void> {
        * most aggressive tiers, the exemption is a heuristic about playback rather than a guarantee
        * for a page assembling audio buffer by buffer. Paying full timer resolution for the length
        * of a meeting is the right trade against a translation that arrives late in bursts.
+       *
+       * The same holds for Meet caption hints: this renderer batches them onto the hub on a timer
+       * (every few hundred ms), and a throttled timer in a hidden window would hold speaker names
+       * back until they no longer match the speech they belong to.
        */
       backgroundThrottling: false,
       preload: path.join(__dirname, "../preload/index.js"),
@@ -328,6 +532,7 @@ async function createWindow(): Promise<void> {
   win.on("closed", () => {
     if (mainWindow === win) {
       mainWindow = null;
+      meetCaptionBuffer.unsubscribe();
     }
   });
 
@@ -335,6 +540,19 @@ async function createWindow(): Promise<void> {
   // to check again if the last check is stale. See updater.ts.
   win.on("show", () => onMainWindowShown());
   win.webContents.once("did-finish-load", () => onMainWindowShown());
+
+  // The signed-out prompt's view of the page: a full load starts over, and the grace period for the
+  // web app to arm the sensor runs from the end of each load. Same-document navigations are the
+  // SPA moving around and change nothing.
+  win.webContents.on("did-start-navigation", (details) => {
+    if (details.isMainFrame && !details.isSameDocument) {
+      signedOutMeetPrompt.pageLoadStarted();
+      // The new page has no caption listener until it asks for the stream again.
+      meetCaptionBuffer.unsubscribe();
+    }
+  });
+  win.webContents.on("render-process-gone", () => meetCaptionBuffer.unsubscribe());
+  win.webContents.on("did-finish-load", () => signedOutMeetPrompt.pageLoaded());
 
   // Minimize to tray instead of closing - except while quitting, when cancelling the close would
   // cancel the quit. See quit-lifecycle.ts.
@@ -452,8 +670,6 @@ async function createWindow(): Promise<void> {
 
 /** The compact transcript view the popup shows. Served by the web app, not by the local renderer. */
 const TRANSCRIPT_ROUTE = "/desktop-transcript";
-/** Flow 2: a Meet is on screen that no room accounts for. The window asks before anything is made. */
-const BRIDGE_OFFER_ROUTE = "/desktop-bridge-offer";
 
 /**
  * A second, small, always-on-top window carrying the live transcript.
@@ -478,14 +694,12 @@ const BRIDGE_OFFER_ROUTE = "/desktop-bridge-offer";
  * do nothing then, which is the dead end again. It brings back what the web app wants shown NOW
  * rather than what this notification announced, which may be twenty minutes and one meeting old.
  */
-function announceBridgeWindow(invited: boolean): void {
+function announceBridgeWindow(): void {
   if (!Notification.isSupported()) return;
 
   const notification = new Notification({
-    title: invited ? "Your translated meeting is ready" : `${APP_NAME} can translate this call`,
-    body: invited
-      ? "The transcript window is open beside your meeting."
-      : "You look like you are in a Google Meet. Open the panel to start translating it.",
+    title: "Your translated meeting is ready",
+    body: "The transcript window is open beside your meeting.",
     icon: getDesktopAssetPath(APP_ICON_FILE),
   });
 
@@ -510,6 +724,32 @@ function announceBridgeWindow(invited: boolean): void {
 }
 
 /**
+ * The signed-out prompt: the user is in a Google Meet call and nobody is signed in to WarpTalk.
+ *
+ * A notification and nothing more - no window raised, nothing focused. Clicking it shows the main
+ * window, which is sitting on the login page; signing in is what arms the real bridge trigger.
+ *
+ * Held in a variable: on Windows a Notification that is garbage-collected loses its click handler.
+ */
+let signInNotification: Notification | null = null;
+
+function announceSignInForMeet(): void {
+  if (!Notification.isSupported()) return;
+
+  const notification = new Notification({
+    title: "Translate this Google Meet call?",
+    body: `Sign in to ${APP_NAME} to translate it and appear with your name.`,
+    icon: getDesktopAssetPath(APP_ICON_FILE),
+  });
+  notification.on("click", () => revealMainWindow());
+  notification.on("close", () => {
+    if (signInNotification === notification) signInNotification = null;
+  });
+  signInNotification = notification;
+  notification.show();
+}
+
+/**
  * Brings back the popup the user closed, on their say-so: the tray item, or a notification.
  *
  * Not announced - the user is the one who asked - and reported to the web app, whose trigger has
@@ -524,43 +764,27 @@ async function reopenTranscriptWindow(): Promise<void> {
   }
 }
 
-/**
- * `roomId` is null for the offer — "you look like you are in a Meet, want to translate it?" — and
- * set once a real room owns the window. That distinction decides how forcefully the window may
- * behave, because only one of the two is backed by something the user arranged.
- */
+/** Opens the popup on `roomId`'s transcript, or moves the open one there. */
 async function openTranscriptWindow(
-  roomId: string | null,
+  roomId: string,
   { announce = true }: { announce?: boolean } = {},
 ): Promise<void> {
-  const invited = roomId !== null;
-
   if (!resolvedWebOrigin) {
     console.error("Cannot open the transcript window before the web UI has loaded.");
     return;
   }
 
-  // The offer carries the call's room code when the sensor read one, so the room it creates stores
-  // the Meet link and shows as a Google Meet meeting. The code is the sensor's own reading of the
-  // browser address, never something the page could have written.
-  const offerMeetCode = meetPresenceWatcher.meetCode;
-  const target = roomId
-    ? `${resolvedWebOrigin}${TRANSCRIPT_ROUTE}/${encodeURIComponent(roomId)}`
-    : `${resolvedWebOrigin}${BRIDGE_OFFER_ROUTE}${
-        offerMeetCode ? `?meetCode=${encodeURIComponent(offerMeetCode)}` : ""
-      }`;
+  const target = `${resolvedWebOrigin}${TRANSCRIPT_ROUTE}/${encodeURIComponent(roomId)}`;
 
   const existing = transcriptPanel.window;
   if (existing && !existing.isDestroyed()) {
     if (existing.isMinimized()) existing.restore();
     existing.show();
     existing.focus();
-    if (announce) announceBridgeWindow(invited);
+    if (announce) announceBridgeWindow();
     transcriptPanel.shown(existing, roomId);
-    // Reusing the window is not the same as leaving it where it was. The offer becomes a
-    // transcript the moment the user accepts, and this used to return early on the strength of a
-    // window merely existing - so the accepted offer stayed on screen, showing the question it had
-    // already been answered.
+    // Reusing the window is not the same as leaving it where it was: the web app moving from one
+    // room to the next must not leave the popup showing the previous room's transcript.
     if (existing.webContents.getURL() !== target) {
       try {
         await existing.loadURL(target);
@@ -579,14 +803,8 @@ async function openTranscriptWindow(
     title: WINDOW_TITLE,
     /**
      * The window is meant to interrupt: it takes focus and announces itself, because a translated
-     * meeting the user does not notice starting is a meeting they will think is broken.
-     *
-     * Known cost, recorded rather than hidden. The `offer` state is reachable from a window title
-     * alone, and a window title is not ours — Chrome names its window after `document.title`, so
-     * any page in any tab can put "Google Meet" there. Interrupting on that signal means any web
-     * page can raise this window and fire a notification, repeatedly. Matching harder cannot fix a
-     * string written by the party the check guards against; only a signal the page does not
-     * control can.
+     * meeting the user does not notice starting is a meeting they will think is broken. It opens
+     * only for a real room the web app asked for, never on a sensor reading alone.
      */
     alwaysOnTop: true,
     show: false,
@@ -613,7 +831,7 @@ async function openTranscriptWindow(
     if (win.isDestroyed()) return;
     win.show();
     win.focus();
-    if (announce) announceBridgeWindow(invited);
+    if (announce) announceBridgeWindow();
   });
 
   /**
@@ -669,6 +887,26 @@ async function openTranscriptWindow(
 }
 
 /**
+ * Aligns Hi-Fi Cable once at startup, when its two sides disagree and the inbound leg is silent.
+ *
+ * Only on a detected mismatch: a machine whose sides already agree, even at another rate, passes
+ * sound and is left as the user set it. In the background, because it spawns PowerShell more than
+ * once and nothing at startup should wait on that. See audio-device-format.ts for why this is not
+ * left to the installer. The align it starts is the same single-flight one the IPC handler joins.
+ */
+async function alignHiFiCableFormatIfMismatched(): Promise<void> {
+  try {
+    const formats = await readHiFiCableFormats();
+    if (!isHiFiFormatMismatch(formats)) return;
+    const result = await alignHiFiCableFormat();
+    if (result.ok) console.log("Aligned the Hi-Fi Cable endpoint formats:", JSON.stringify(result));
+    else console.warn("Could not align the Hi-Fi Cable endpoint formats:", JSON.stringify(result));
+  } catch (error) {
+    console.warn("Could not check the Hi-Fi Cable endpoint formats:", error);
+  }
+}
+
+/**
  * Hands the bundled virtual-audio installer to the OS installer UI.
  *
  * Deliberately not silent. It writes into /Library and needs an administrator, so the user is told
@@ -685,8 +923,10 @@ async function runVirtualAudioInstaller(): Promise<{ started: boolean; reason?: 
         "carries your translated voice into the meeting, and Hi-Fi Cable carries the meeting back " +
         "to WarpTalk. Install both and restart if an installer asks.\n\n" +
         "Then, in Google Meet's audio settings, choose CABLE Output as the microphone and Hi-Fi " +
-        "Cable Input as the speaker. In Windows Sound settings, set Hi-Fi Cable Input and Hi-Fi " +
-        "Cable Output to the same format, 48000 Hz — it passes no sound when they differ.\n\n" +
+        "Cable Input as the speaker. WarpTalk sets both Hi-Fi Cable endpoints to the same format " +
+        "when it starts; if the meeting stays silent, open Windows Sound settings and set BOTH Hi-Fi " +
+        "Cable Input and Hi-Fi Cable Output to 24 bit, 48000 Hz. The cable passes no sound when " +
+        "their sample rate or bit depth differ.\n\n" +
         "Without Hi-Fi Cable, WarpTalk still works but listens to your whole browser, so sound " +
         "from other tabs is translated too.\n\n" +
         "WarpTalk does not install a driver silently or change your Windows default audio device.",
@@ -1220,6 +1460,7 @@ if (!app.requestSingleInstanceLock()) {
       iconPath: getDesktopAssetPath(APP_ICON_FILE),
     });
     void ensureBundledMacDriversInstalled();
+    if (process.platform === "win32") void alignHiFiCableFormatIfMismatched();
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -1235,8 +1476,13 @@ if (!app.requestSingleInstanceLock()) {
     // Child processes this app started do not die with it on their own. The audit found the
     // loopback capture surviving both a renderer crash and quit; the URL sensor is a second such
     // child and is stopped here rather than repeating that.
+    signedOutMeetPrompt.dispose();
     meetPresenceWatcher.disarm();
     meetUrlSensor.stop();
+    meetCaptionStream.stop();
+    meetCaptionSensor.stop();
+    for (const contents of [...meetMicSubscribers.keys()]) unsubscribeMeetMic(contents);
+    meetMicStream.stop();
     void windowsLoopbackRuntime.stop();
   });
 
