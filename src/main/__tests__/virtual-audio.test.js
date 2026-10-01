@@ -11,6 +11,8 @@ import {
 
 const SUPPORTED_BUILD = 22631;
 const UNSUPPORTED_BUILD = 19045;
+const CABLE_OUTPUT = "CABLE Output (VB-Audio Virtual Cable)";
+const HIFI_OUTPUT = "Hi-Fi Cable Output (VB-Audio Hi-Fi Cable)";
 
 test("Windows recommends the free cable when it is installed on a process-loopback build", () => {
   const status = describeWindowsVirtualAudioForEndpoints(
@@ -346,4 +348,53 @@ test("a source path with quotes survives both the shell and the AppleScript quot
   // Every double quote inside the literal is escaped, so the literal cannot end early.
   const literal = command.slice('do shell script "'.length, -'" with administrator privileges'.length);
   assert.doesNotMatch(literal, /(^|[^\\])"/);
+});
+
+test("bridge modes: no cable means text-only possible and voice not possible", () => {
+  const status = describeWindowsVirtualAudioForEndpoints([], SUPPORTED_BUILD, true);
+  assert.deepEqual(status.bridgeModes, {
+    textOnly: { possible: true },
+    voice: { possible: false, cableInstalled: false, reason: "cable-missing" },
+  });
+  // bridgeMode keeps describing voice mode, unchanged.
+  assert.equal(status.bridgeMode, "caption-only");
+});
+
+test("bridge modes: VB-CABLE with loopback makes voice possible via loopback", () => {
+  const status = describeWindowsVirtualAudioForEndpoints([CABLE_OUTPUT], SUPPORTED_BUILD, true);
+  assert.deepEqual(status.bridgeModes, {
+    textOnly: { possible: true },
+    voice: { possible: true, cableInstalled: true, inbound: "process-loopback" },
+  });
+});
+
+test("bridge modes: two free cables make voice possible even where loopback is not", () => {
+  const status = describeWindowsVirtualAudioForEndpoints([CABLE_OUTPUT, HIFI_OUTPUT], UNSUPPORTED_BUILD, false);
+  assert.deepEqual(status.bridgeModes, {
+    textOnly: { possible: false, reason: "process-loopback-unsupported" },
+    voice: { possible: true, cableInstalled: true, inbound: "hifi-cable" },
+  });
+});
+
+test("bridge modes: an unwired loopback runtime blocks text-only and loopback-voice", () => {
+  const status = describeWindowsVirtualAudioForEndpoints([CABLE_OUTPUT], SUPPORTED_BUILD, false);
+  assert.deepEqual(status.bridgeModes, {
+    textOnly: { possible: false, reason: "loopback-runtime-not-wired" },
+    voice: { possible: false, cableInstalled: true, reason: "inbound-unavailable" },
+  });
+});
+
+test("bridge modes: Hi-Fi Cable alone is not the voice cable", () => {
+  const status = describeWindowsVirtualAudioForEndpoints([HIFI_OUTPUT], SUPPORTED_BUILD, true);
+  assert.equal(status.bridgeModes?.voice.cableInstalled, false);
+  assert.equal(status.bridgeModes?.voice.possible, false);
+  assert.equal(status.bridgeModes?.textOnly.possible, true);
+});
+
+test("bridge modes on a Mac: no text-only, voice once both devices are in", () => {
+  assert.deepEqual(describeMacVirtualAudio(["WarpTalkMicrophone.driver", "WarpTalkSpeaker.driver"]).bridgeModes, {
+    textOnly: { possible: false, reason: "process-loopback-unsupported" },
+    voice: { possible: true, cableInstalled: true, inbound: "virtual-device" },
+  });
+  assert.equal(describeMacVirtualAudio([]).bridgeModes?.voice.reason, "cable-missing");
 });

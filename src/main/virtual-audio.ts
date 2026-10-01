@@ -77,6 +77,39 @@ export interface VirtualAudioStatus {
   hifiFormat?: HiFiCableFormats;
   /** The two sides disagree on rate or depth, so the cable passes no sound. See audio-device-format.ts. */
   hifiFormatMismatch?: boolean;
+  /**
+   * Which bridge modes this machine can run right now. Additive: older readers ignore it, and a
+   * status without it (an older desktop build) means "only voice mode exists".
+   */
+  bridgeModes?: BridgeModeAvailability;
+}
+
+/**
+ * The two ways a bridge meeting can run, answered separately.
+ *
+ * TEXT-ONLY: Meet keeps the user's real microphone and speakers and no cable is involved. WarpTalk
+ * captures the real mic itself and the far side through per-process loopback on the browser, and
+ * shows transcript + translation only. It needs the loopback path and nothing else.
+ *
+ * VOICE: the dub has to reach the meeting, so Meet's microphone must be VB-CABLE's "CABLE Output",
+ * and the far side has to come back on Hi-Fi Cable or through loopback.
+ *
+ * `bridgeMode` stays exactly what it was — it describes voice mode — so web code that reads it is
+ * unaffected.
+ */
+export interface BridgeModeAvailability {
+  textOnly: {
+    possible: boolean;
+    reason?: "unsupported-platform" | "process-loopback-unsupported" | "loopback-runtime-not-wired";
+  };
+  voice: {
+    possible: boolean;
+    /** VB-CABLE on Windows, the outbound device of the pair on macOS. */
+    cableInstalled: boolean;
+    /** How the far side would come back in voice mode. */
+    inbound?: "hifi-cable" | "process-loopback" | "virtual-device";
+    reason?: "unsupported-platform" | "cable-missing" | "inbound-unavailable";
+  };
 }
 
 export interface VirtualAudioRiskControl {
@@ -357,7 +390,7 @@ function normalizeDeviceName(name: string): string {
  * safe the moment a second cable was registered: "cable output" is inside "Hi-Fi Cable Output", so a
  * machine with only Hi-Fi Cable read as having VB-CABLE. The stem now has to START the name.
  */
-function matchesDeviceName(name: string, expected: string): boolean {
+export function matchesDeviceName(name: string, expected: string): boolean {
   const candidate = normalizeDeviceName(name);
   const stem = normalizeDeviceName(expected.split(" (")[0] ?? expected);
   return candidate === normalizeDeviceName(expected) || candidate === stem || candidate.startsWith(`${stem} (`);
@@ -454,6 +487,22 @@ export function describeWindowsVirtualAudioForEndpoints(
     installedBackupProvider ??
     outboundProvider ??
     primaryProvider;
+  const loopbackUsable = processLoopback && runtimeReady;
+  const bridgeModes: BridgeModeAvailability = {
+    textOnly: loopbackUsable
+      ? { possible: true }
+      : {
+          possible: false,
+          reason: processLoopback ? "loopback-runtime-not-wired" : "process-loopback-unsupported",
+        },
+    voice: !outboundProvider
+      ? { possible: false, cableInstalled: false, reason: "cable-missing" }
+      : twoFreeCables
+        ? { possible: true, cableInstalled: true, inbound: "hifi-cable" }
+        : loopbackUsable
+          ? { possible: true, cableInstalled: true, inbound: "process-loopback" }
+          : { possible: false, cableInstalled: true, reason: "inbound-unavailable" },
+  };
   const mode = twoFreeCables
     ? "full"
     : outboundProvider && processLoopback
@@ -482,6 +531,7 @@ export function describeWindowsVirtualAudioForEndpoints(
       minWindowsProcessLoopbackBuild: WINDOWS_PROCESS_LOOPBACK_MIN_BUILD,
     },
     riskControls: [...WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS],
+    bridgeModes,
     foreignDrivers: Array.from(endpointNames).filter(
       (name) =>
         !WINDOWS_PROVIDERS.some(
@@ -528,6 +578,10 @@ export function detectVirtualAudio(runtimeReady = false): VirtualAudioStatus {
         processLoopbackRuntime: "not-wired",
       },
       riskControls: [],
+      bridgeModes: {
+        textOnly: { possible: false, reason: "unsupported-platform" },
+        voice: { possible: false, cableInstalled: false, reason: "unsupported-platform" },
+      },
       foreignDrivers: [],
     };
   }
@@ -617,6 +671,19 @@ export function describeMacVirtualAudio(presentBundles: readonly string[]): Virt
       processLoopbackRuntime: "not-wired",
     },
     riskControls: [],
+    // No per-process loopback on macOS, so no text-only path yet: inbound needs the second device.
+    bridgeModes: {
+      textOnly: { possible: false, reason: "process-loopback-unsupported" },
+      voice: ready
+        ? { possible: true, cableInstalled: true, inbound: "virtual-device" }
+        : {
+            possible: false,
+            cableInstalled: chosen.devices.some((device) => device.leg === "outbound" && device.installed),
+            reason: chosen.devices.some((device) => device.leg === "outbound" && device.installed)
+              ? "inbound-unavailable"
+              : "cable-missing",
+          },
+    },
     foreignDrivers: presentBundles.filter((bundle) => !isOurs(bundle)),
   };
 }
