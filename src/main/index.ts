@@ -12,6 +12,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  nativeTheme,
   Notification,
   session,
   shell,
@@ -29,6 +30,15 @@ import {
   WindowsLoopbackRuntime,
 } from "./windows-loopback-runtime";
 import { MeetPresenceWatcher } from "./meet-presence";
+import { RendererCrashGuard, windowBackgroundColor } from "./renderer-recovery";
+import {
+  createMainLog,
+  instrumentIpc,
+  loggableUrl,
+  rendererConsoleLevel,
+  teeConsole,
+  type MainLog,
+} from "./main-log";
 import {
   captureStateOf,
   MeetGoneCaptureGuard,
@@ -121,6 +131,8 @@ let isQuitting = false;
  * mode that would fork a second Next server.
  */
 let resolvedWebOrigin: string | null = null;
+/** main.log, once the app is the single instance. Null before that, and in a copy that lost the lock. */
+let mainLog: MainLog | null = null;
 const audioRuntime = new AudioRuntimeService();
 
 /**
@@ -164,6 +176,7 @@ const meetCallTracker = new MeetCallStateTracker({
     observeMeetForCaptureGuard();
   },
   emitSelfMic: (mic) => {
+    mainLog?.info("meet", "self mic", mic);
     sendToWindows([mainWindow, transcriptPanel.window], "bridge:meet-self-mic", mic);
   },
 });
@@ -197,6 +210,10 @@ function observeMeetForCaptureGuard(): void {
 const meetPresenceWatcher = new MeetPresenceWatcher({
   readMeetSighting,
   onChange: (presence: MeetPresence) => {
+    mainLog?.info("meet", "presence", {
+      meetWindowVisible: presence.meetWindowVisible,
+      meetCode: presence.meetCode ?? null,
+    });
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("bridge:meet-presence", presence);
     }
@@ -678,6 +695,46 @@ function isDesktopLandingUrl(url: string, trustedOrigin: string): boolean {
   }
 }
 
+/**
+ * WT-930: a window whose page process dies is reloaded instead of being left blank, and asks the
+ * user once it keeps dying. See renderer-recovery.ts. One guard per window, so a popup that crashes
+ * does not use up the main window's reloads.
+ *
+ * Hangs are only reported: a page that stops responding usually comes back, and reloading it would
+ * throw away a meeting that was merely slow.
+ */
+function watchRendererHealth(win: BrowserWindow, label: "main" | "popup"): void {
+  const guard = new RendererCrashGuard();
+  win.webContents.on("render-process-gone", (_event, details) => {
+    const action = guard.decide(details.reason, { isQuitting });
+    console.error(
+      `[renderer] ${label} page process gone (${details.reason}, exit ${details.exitCode}): ${action}`,
+    );
+    if (action === "ignore" || win.isDestroyed()) return;
+    if (action === "reload") {
+      win.webContents.reload();
+      return;
+    }
+    void dialog
+      .showMessageBox(win, {
+        type: "error",
+        title: WINDOW_TITLE,
+        message: "WarpTalk stopped working in this window.",
+        detail: "It was reloaded but stopped again. Reload it once more, or quit WarpTalk from the tray.",
+        buttons: ["Reload", "Not now"],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      .then(({ response }) => {
+        if (response !== 0 || win.isDestroyed()) return;
+        guard.reset();
+        win.webContents.reload();
+      });
+  });
+  win.on("unresponsive", () => console.warn(`[renderer] ${label} window stopped responding`));
+  win.on("responsive", () => console.warn(`[renderer] ${label} window is responding again`));
+}
+
 async function createWindow(): Promise<void> {
   const win = new BrowserWindow({
     width: 1200,
@@ -687,6 +744,8 @@ async function createWindow(): Promise<void> {
     title: WINDOW_TITLE,
     icon: getDesktopAssetPath(APP_ICON_FILE),
     autoHideMenuBar: true,
+    // WT-930: never a bare white. See windowBackgroundColor.
+    backgroundColor: windowBackgroundColor(nativeTheme.shouldUseDarkColors),
     webPreferences: {
       /**
        * This window does realtime audio work while nobody is looking at it, which is not an edge
@@ -744,6 +803,7 @@ async function createWindow(): Promise<void> {
     }
   });
   win.webContents.on("render-process-gone", () => meetCaptionBuffer.unsubscribe());
+  watchRendererHealth(win, "main");
   win.webContents.on("did-finish-load", () => signedOutMeetPrompt.pageLoaded());
 
   // Minimize to tray instead of closing - except while quitting, when cancelling the close would
@@ -1022,6 +1082,7 @@ async function openTranscriptWindow(
     alwaysOnTop: true,
     show: false,
     autoHideMenuBar: true,
+    backgroundColor: windowBackgroundColor(nativeTheme.shouldUseDarkColors),
     // Small and unobtrusive: it sits over a browser window for the whole meeting.
     skipTaskbar: false,
     webPreferences: {
@@ -1038,6 +1099,7 @@ async function openTranscriptWindow(
     },
   });
   transcriptPanel.shown(win, roomId);
+  watchRendererHealth(win, "popup");
 
   /**
    * Revealed on first paint, not after `loadURL` resolves.
@@ -1412,6 +1474,7 @@ function refreshTrayMenu(): void {
           showApp: () => mainWindow?.show(),
           showMeetingPanel: () => void reopenTranscriptWindow(),
           checkForUpdates: () => void checkForUpdatesInteractive(),
+          openLogs: () => void shell.openPath(app.getPath("logs")),
           installUpdate: () => installUpdate(),
           quit: () => app.quit(),
         },
@@ -1649,6 +1712,89 @@ function revealMainWindow(): void {
   mainWindow.focus();
 }
 
+/**
+ * Opens main.log and sends everything main prints to it. See main-log.ts for what goes in and what
+ * never does. Only the instance that holds the single-instance lock logs: a second copy exits at
+ * once and must not write into the running one's file.
+ */
+function startMainLog(): void {
+  try {
+    mainLog = createMainLog(path.join(app.getPath("logs"), "main.log"));
+  } catch {
+    return;
+  }
+  const log = mainLog;
+  teeConsole(log);
+  log.info("app", "start", {
+    version: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    os: process.getSystemVersion(),
+    packaged: app.isPackaged,
+    electron: process.versions.electron,
+  });
+
+  // Monitor, not handler: Electron's own handling of an uncaught exception is left as it is.
+  process.on("uncaughtExceptionMonitor", (error) => {
+    log.error("app", "uncaught exception", error);
+    log.flush();
+  });
+  process.on("unhandledRejection", (reason) => log.error("app", "unhandled rejection", reason));
+  app.on("render-process-gone", (_event, contents, details) => {
+    log.error("app", "renderer gone", {
+      window: windowLabel(contents),
+      reason: details.reason,
+      exitCode: details.exitCode,
+    });
+  });
+  app.on("child-process-gone", (_event, details) => {
+    log.error("app", "child process gone", {
+      type: details.type,
+      name: details.name ?? null,
+      reason: details.reason,
+      exitCode: details.exitCode,
+    });
+  });
+}
+
+/** Which window a line is about. The popup is asked first: it can be created before `mainWindow`. */
+function windowLabel(contents: Electron.WebContents): string {
+  const popup = transcriptPanel.window;
+  if (popup && !popup.isDestroyed() && popup.webContents === contents) return "popup";
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents === contents) return "main";
+  return `other#${contents.id}`;
+}
+
+/**
+ * A window's loads, and the warnings and errors its page prints. The hidden main window carries
+ * the meeting session, so its console is where a bridge meeting that "does nothing" explains
+ * itself - and it was unreachable in a packaged app.
+ */
+function logWebContents(contents: Electron.WebContents): void {
+  const log = mainLog;
+  if (!log) return;
+  contents.on("did-finish-load", () => {
+    log.info("window", "loaded", { window: windowLabel(contents), url: loggableUrl(contents.getURL()) });
+  });
+  contents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return;
+    log.error("window", "failed to load", {
+      window: windowLabel(contents),
+      url: loggableUrl(validatedURL),
+      errorCode,
+      errorDescription,
+    });
+  });
+  contents.on("console-message", (event, ...legacy: unknown[]) => {
+    // Electron 35+ puts the details on the event; older versions passed them as arguments.
+    const details = event as unknown as { level?: unknown; message?: unknown };
+    const level = rendererConsoleLevel(details.level ?? legacy[0]);
+    if (!level) return;
+    const message = typeof details.message === "string" ? details.message : String(legacy[1] ?? "");
+    log[level]("renderer", `${windowLabel(contents)}: ${message}`);
+  });
+}
+
 // A second copy would run its own tray and, in local-packaged mode, fork a
 // second Next server on another port. Hand the launch to the running instance
 // instead. Must be claimed before `whenReady` so the loser exits early.
@@ -1673,9 +1819,12 @@ if (!app.requestSingleInstanceLock()) {
     handlePluginConnectDeepLink(url);
   });
 
+  startMainLog();
+
   app.whenReady().then(() => {
     registerPluginConnectScheme();
     applyApplicationMenu();
+    if (mainLog) instrumentIpc(ipcMain, mainLog);
     registerIpcHandlers();
     registerDisplayMediaHandler();
     registerPermissionHandler();
@@ -1706,6 +1855,8 @@ if (!app.requestSingleInstanceLock()) {
   app.on("before-quit", () => {
     // First, and before anything that could throw: this is what lets the windows close.
     isQuitting = true;
+    mainLog?.info("app", "quitting");
+    mainLog?.flush();
     webRuntime.stop();
     // Child processes this app started do not die with it on their own. The audit found the
     // loopback capture surviving both a renderer crash and quit; the URL sensor is a second such
@@ -1734,6 +1885,7 @@ if (!app.requestSingleInstanceLock()) {
     contents.on("will-prevent-unload", (event) => {
       if (shouldIgnoreBeforeUnload({ isQuitting })) event.preventDefault();
     });
+    logWebContents(contents);
   });
 
   app.on("window-all-closed", () => {

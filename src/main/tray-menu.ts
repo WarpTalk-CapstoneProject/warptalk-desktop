@@ -13,6 +13,8 @@ export interface TrayMenuActions {
   showMeetingPanel: () => void;
   /** Asks electron-updater now, and always answers. See updater.ts checkForUpdatesInteractive. */
   checkForUpdates: () => void;
+  /** Opens the folder holding main.log and updater.log. See main-log.ts. */
+  openLogs: () => void;
   /** Installs the downloaded update (or, on a portable copy, opens the download page). */
   installUpdate: () => void;
   quit: () => void;
@@ -63,6 +65,11 @@ export function trayMenuTemplate(
     {
       label: "Check for Updates…",
       click: () => actions.checkForUpdates(),
+    },
+    // What a user can send when the desktop "did nothing" in a meeting: main.log and updater.log.
+    {
+      label: "Open Logs Folder",
+      click: () => actions.openLogs(),
     },
     {
       label: "Quit",
