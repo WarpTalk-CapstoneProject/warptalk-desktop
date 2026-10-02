@@ -7,11 +7,16 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 import type {
+  ArmMeetWindowCaptureResult,
+  AudioCaptureState,
+  AudioCaptureStopped,
   DesktopRuntimeCapability,
   EnsureMeetCaptionsResult,
   MeetCaptionEvent,
   MeetCaptionStatus,
+  MeetCallState,
   MeetMicState,
+  MeetSelfMic,
   HiFiFormatAlignResult,
   MeetPresence,
   WindowsLoopbackPcmChunk,
@@ -31,6 +36,13 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.invoke("audio:start-capture", request),
   stopAudioCapture: (): Promise<void> =>
     ipcRenderer.invoke("audio:stop-capture"),
+  getCaptureState: (): Promise<AudioCaptureState> =>
+    ipcRenderer.invoke("audio:get-capture-state"),
+  onAudioCaptureStopped: (callback: (event: AudioCaptureStopped) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, event: AudioCaptureStopped) => callback(event);
+    ipcRenderer.on("audio:capture-stopped", listener);
+    return () => ipcRenderer.off("audio:capture-stopped", listener);
+  },
   onWindowsLoopbackPcmChunk: (callback: (chunk: WindowsLoopbackPcmChunk) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, chunk: WindowsLoopbackPcmChunk) => callback(chunk);
     ipcRenderer.on("audio:loopback-pcm-chunk", listener);
@@ -125,6 +137,26 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.on("bridge:meet-mic-state", listener);
     return () => ipcRenderer.off("bridge:meet-mic-state", listener);
   },
+  // One-shot: the next getDisplayMedia from the main window takes the sighted Meet window (WT-910).
+  armMeetWindowCapture: (roomId: string): Promise<ArmMeetWindowCaptureResult> =>
+    ipcRenderer.invoke("bridge:arm-meet-window-capture", roomId),
+
+  // In the Meet call or not, and Meet's own mute button (tab or picture-in-picture). See
+  // meet-call-state.ts. Fed by the presence watch; the getters are for a late subscriber.
+  onMeetCallState: (callback: (state: MeetCallState) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: MeetCallState) => callback(state);
+    ipcRenderer.on("bridge:meet-call-state", listener);
+    return () => ipcRenderer.off("bridge:meet-call-state", listener);
+  },
+  getMeetCallState: (): Promise<MeetCallState> =>
+    ipcRenderer.invoke("bridge:get-meet-call-state"),
+  onMeetSelfMic: (callback: (mic: MeetSelfMic) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, mic: MeetSelfMic) => callback(mic);
+    ipcRenderer.on("bridge:meet-self-mic", listener);
+    return () => ipcRenderer.off("bridge:meet-self-mic", listener);
+  },
+  getMeetSelfMic: (): Promise<MeetSelfMic> =>
+    ipcRenderer.invoke("bridge:get-meet-self-mic"),
 
   minimize: (): void => ipcRenderer.send("window:minimize"),
   maximize: (): void => ipcRenderer.send("window:maximize"),

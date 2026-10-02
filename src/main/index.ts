@@ -17,6 +17,7 @@ import {
   shell,
   systemPreferences,
   Tray,
+  webContents,
 } from "electron";
 import fs from "fs";
 import { spawn } from "child_process";
@@ -28,7 +29,19 @@ import {
   WindowsLoopbackRuntime,
 } from "./windows-loopback-runtime";
 import { MeetPresenceWatcher } from "./meet-presence";
+import {
+  captureStateOf,
+  MeetGoneCaptureGuard,
+  prepareCaptureRequest,
+  sendToWindows,
+  type CaptureStartedVia,
+} from "./capture-target";
 import { MeetUrlSensor } from "./meet-url-sensor";
+import {
+  MeetWindowCaptureArm,
+  armPreconditionRefusal,
+  resolveMeetWindowSource,
+} from "./meet-window-capture";
 import { MacMeetUrlSensor } from "./meet-url-sensor-mac";
 import { MeetCaptionSensor } from "./meet-caption-sensor";
 import { MeetCaptionBuffer } from "./meet-caption-buffer";
@@ -41,6 +54,7 @@ import {
   singleFlight,
 } from "./meet-captions";
 import { MeetMicStateStream, MicSessionSensor } from "./meet-mic-state";
+import { MeetCallStateTracker } from "./meet-call-state";
 import { TranscriptPanelLedger } from "./transcript-panel";
 import { SignedOutMeetPrompt } from "./signed-out-meet-prompt";
 import { trayMenuTemplate } from "./tray-menu";
@@ -54,7 +68,14 @@ import {
 } from "./updater";
 import { trayBadged, trayTooltip, trayUpdateLabel } from "./update-policy";
 import { withUpdateDot } from "./tray-badge";
-import type { EnsureMeetCaptionsResult, MeetMicState, MeetPresence } from "../shared/types";
+import type {
+  ArmMeetWindowCaptureResult,
+  AudioCaptureState,
+  AudioCaptureStopped,
+  EnsureMeetCaptionsResult,
+  MeetMicState,
+  MeetPresence,
+} from "../shared/types";
 import {
   describeWindowsLoopbackSources,
   resolveWindowOwnerProcessId,
@@ -90,6 +111,8 @@ let trayIcon: Electron.NativeImage | null = null;
 let trayIconBadged: Electron.NativeImage | null = null;
 /** Whether the renderer has a loopback capture running, i.e. a bridge meeting is being translated. */
 let loopbackCapturing = false;
+/** How the running capture was aimed, for `audio:get-capture-state`. Null while none runs. */
+let captureStartedVia: CaptureStartedVia | null = null;
 /** Set once the app has decided to quit, before any window is asked to close. See quit-lifecycle.ts. */
 let isQuitting = false;
 /**
@@ -120,21 +143,100 @@ const audioRuntime = new AudioRuntimeService();
  */
 const meetUrlSensor = process.platform === "darwin" ? new MacMeetUrlSensor() : new MeetUrlSensor();
 
+/**
+ * In the call or not, and Meet's own mute button - `bridge:meet-call-state` and
+ * `bridge:meet-self-mic` (meet-call-state.ts). Windows only: the macOS sensor asks the browser
+ * for an address and never sees a button, so there the tracker only ever says "unknown".
+ *
+ * It has no arm of its own. Every presence look feeds it (the read below), and while presence has
+ * Meet in sight it runs a faster read on the same helper so a mute arrives in about a second
+ * rather than three. Both windows get the events: the main window carries the meeting session,
+ * the bridge popup is what the user is looking at.
+ */
+const meetCallTracker = new MeetCallStateTracker({
+  probe:
+    meetUrlSensor instanceof MeetUrlSensor
+      ? async () => (await meetUrlSensor.scan("state")).surfaces
+      : null,
+  emitCallState: (state) => {
+    console.log("Meet call state:", JSON.stringify(state));
+    sendToWindows([mainWindow, transcriptPanel.window], "bridge:meet-call-state", state);
+    observeMeetForCaptureGuard();
+  },
+  emitSelfMic: (mic) => {
+    sendToWindows([mainWindow, transcriptPanel.window], "bridge:meet-self-mic", mic);
+  },
+});
+
+/** The presence look, which on Windows also carries the buttons the call-state tracker reads. */
+async function readMeetSighting(): Promise<Awaited<ReturnType<MeetUrlSensor["read"]>>> {
+  if (!(meetUrlSensor instanceof MeetUrlSensor)) return meetUrlSensor.read();
+  try {
+    const scan = await meetUrlSensor.scan("look");
+    meetCallTracker.ingest(scan.surfaces);
+    return scan.sighting;
+  } catch (error) {
+    meetCallTracker.ingestFailure();
+    throw error;
+  }
+}
+
+/**
+ * What the stop-when-Meet-is-gone guard is told. A "you left the meeting" page still counts as a
+ * Meet window for presence (the address is still Meet's), but for a capture it is exactly the case
+ * the guard exists for: the call is over and the browser's next sound would flow into the room.
+ * So `left` counts as gone here. It is reported only after it held (see the tracker), the guard
+ * then waits its own 60 s, and a rejoin - or the picture-in-picture window - cancels it.
+ */
+function observeMeetForCaptureGuard(): void {
+  meetGoneCaptureGuard.observe({
+    meetWindowVisible: meetPresenceWatcher.meetWindowVisible && meetCallTracker.callState.phase !== "left",
+  });
+}
+
 const meetPresenceWatcher = new MeetPresenceWatcher({
-  readMeetSighting: () => meetUrlSensor.read(),
+  readMeetSighting,
   onChange: (presence: MeetPresence) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("bridge:meet-presence", presence);
     }
     signedOutMeetPrompt.presence(presence);
+    meetCallTracker.setPolling(presence.meetWindowVisible);
+    observeMeetForCaptureGuard();
   },
 });
+
+/**
+ * Stops a capture aimed by the Meet sighting once Meet has been gone for the grace, when the
+ * renderer asked for that (`stopWhenMeetGone`). See capture-target.ts for the grace and why it is
+ * long. The main window is told, and handles it like any other capture failure.
+ */
+const meetGoneCaptureGuard = new MeetGoneCaptureGuard({
+  isWatching: () => meetPresenceWatcher.armed,
+  onGone: () => {
+    loopbackCapturing = false;
+    captureStartedVia = null;
+    meetWindowCaptureArm.disarm();
+    void windowsLoopbackRuntime.stop();
+    const event: AudioCaptureStopped = { reason: "meet-gone" };
+    console.log("Loopback capture stopped: Meet out of sight past the grace.");
+    sendToWindows([mainWindow], "audio:capture-stopped", event);
+  },
+});
+
+/**
+ * The one-shot that lets the main window's next getDisplayMedia take the Meet window with no
+ * picker, for recording a bridge meeting (WT-910). See meet-window-capture.ts for why it is armed,
+ * one-shot, main-window-only and HWND-matched; registerDisplayMediaHandler is where it is spent.
+ */
+const meetWindowCaptureArm = new MeetWindowCaptureArm<Electron.DesktopCapturerSource>();
 
 /** Main's own use of the watcher while nobody is signed in. See signed-out-meet-prompt.ts. */
 const signedOutMeetPrompt = new SignedOutMeetPrompt({
   armWatcher: () => meetPresenceWatcher.arm(),
   disarmWatcher: () => {
     meetPresenceWatcher.disarm();
+    meetCallTracker.reset();
     // Same as the web app's disarm: the helper shell would otherwise outlive the watch.
     meetUrlSensor.stop();
   },
@@ -152,7 +254,8 @@ const webRuntime = new WebRuntimeService();
 
 /**
  * Speaker names from Google Meet's own captions (see meet-captions.ts). Windows only; behind the
- * `bridgeMeetCaptionNames` flag (env WARPTALK_BRIDGE_MEET_CAPTION_NAMES, default on in dev).
+ * `bridgeMeetCaptionNames` flag (env WARPTALK_BRIDGE_MEET_CAPTION_NAMES, default ON, dev and
+ * packaged; 0/false/off is the kill switch).
  * The helper is a PowerShell process of its own, started on first use and stopped with the stream.
  */
 const bridgeMeetCaptionNames =
@@ -252,15 +355,99 @@ function registerIpcHandlers(): void {
   ipcMain.handle("app:open-external", async (_event, url: string) => {
     openExternalUrl(url);
   });
-  ipcMain.handle("audio:start-capture", async (_event, request) => {
-    const result = await windowsLoopbackRuntime.start(request);
+  ipcMain.handle("audio:start-capture", async (_event, request: unknown) => {
+    // `target: "meet-sighting"` only fills in the PID from main's own sighting; every gate in the
+    // runtime (R1 never-ourselves, consent, readiness...) still runs on the result.
+    const prepared = prepareCaptureRequest(request, {
+      armed: meetPresenceWatcher.armed,
+      visible: meetPresenceWatcher.meetWindowVisible,
+      processId: meetPresenceWatcher.meetProcessId,
+    });
+    if (!("ok" in prepared)) return prepared;
+    // A new start replaces the old capture inside the runtime; its stop-on-gone goes with it.
+    meetGoneCaptureGuard.end();
+    const result = await windowsLoopbackRuntime.start(prepared.request);
     loopbackCapturing = result.started;
+    captureStartedVia = result.started ? prepared.startedVia : null;
+    if (result.started && prepared.stopWhenMeetGone) {
+      meetGoneCaptureGuard.begin();
+      // A capture aimed at a "you left" page starts its countdown now, not at the next change.
+      observeMeetForCaptureGuard();
+    }
     return result;
   });
   ipcMain.handle("audio:stop-capture", async () => {
     loopbackCapturing = false;
+    captureStartedVia = null;
+    // The arm leaned on this capture's consent; an unspent one must not outlive it.
+    meetWindowCaptureArm.disarm();
+    meetGoneCaptureGuard.end();
     return windowsLoopbackRuntime.stop();
   });
+  // For a main window that reloaded mid-meeting: the capture lives in main and outlives it.
+  ipcMain.handle("audio:get-capture-state", (): AudioCaptureState =>
+    captureStateOf({
+      capturing: loopbackCapturing,
+      mode: windowsLoopbackRuntime.activeMode,
+      targetProcessId: windowsLoopbackRuntime.activeTargetProcessId,
+      startedVia: captureStartedVia,
+    }),
+  );
+  // Recording a bridge meeting with Meet's UI in it (WT-910): arm the NEXT getDisplayMedia from the
+  // main window to take the sighted Meet window without a picker. See meet-window-capture.ts.
+  ipcMain.handle(
+    "bridge:arm-meet-window-capture",
+    async (event, roomId: unknown): Promise<ArmMeetWindowCaptureResult> => {
+      const fromMainWindow =
+        mainWindow !== null && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents;
+      // The only consent main holds is the running loopback capture, which R5 refused to start
+      // without `consentGranted`. No capture, no dialog-free window grab.
+      const refusal = armPreconditionRefusal({
+        platform: process.platform,
+        fromMainWindow,
+        roomId,
+        consentedCaptureRunning: loopbackCapturing,
+      });
+      if (refusal) {
+        console.log(`Meet window capture not armed: ${refusal}.`);
+        return { ok: false, reason: refusal };
+      }
+
+      let sources: Electron.DesktopCapturerSource[];
+      try {
+        sources = await desktopCapturer.getSources({
+          types: ["window"],
+          thumbnailSize: { width: 0, height: 0 },
+        });
+      } catch (error) {
+        console.error("Could not enumerate window sources for the Meet window capture:", error);
+        return { ok: false, reason: "meet-window-not-found" };
+      }
+
+      // Read after the await: the sighting the arm is matched against is the newest one.
+      const resolved = resolveMeetWindowSource(
+        {
+          armed: meetPresenceWatcher.armed,
+          visible: meetPresenceWatcher.meetWindowVisible,
+          windowHandle: meetPresenceWatcher.meetWindowHandle,
+          inPictureInPicture:
+            meetPresenceWatcher.meetWindowVia === "pip" || meetCallTracker.callState.via === "pip",
+        },
+        sources,
+      );
+      if (!resolved.ok) {
+        console.log(`Meet window capture not armed: ${resolved.reason}.`);
+        return { ok: false, reason: resolved.reason };
+      }
+
+      meetWindowCaptureArm.arm(
+        { webContentsId: event.sender.id, source: resolved.source, roomId: roomId as string },
+        Date.now(),
+      );
+      console.log("Meet window capture armed for the next getDisplayMedia from the main window.");
+      return { ok: true, sourceName: resolved.source.name };
+    },
+  );
   // Arm/disarm rather than a query: the renderer would otherwise have to poll main, which polls
   // the OS, and two loops out of step is how a widget ends up a few seconds behind the meeting.
   ipcMain.handle("bridge:watch-meet-presence", () => {
@@ -269,6 +456,7 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("bridge:unwatch-meet-presence", () => {
     meetPresenceWatcher.disarm();
+    meetCallTracker.reset();
     // The helper is one long-lived shell. Disarming without killing it would leave a PowerShell
     // process alive for the rest of the session, polling nothing.
     meetUrlSensor.stop();
@@ -375,6 +563,10 @@ function registerIpcHandlers(): void {
       meetMicStream.start();
     }
   });
+  // The current values, for a renderer that subscribed after the last change (a reload, the popup
+  // opening mid-call). The events themselves are sent on change only.
+  ipcMain.handle("bridge:get-meet-call-state", () => meetCallTracker.callState);
+  ipcMain.handle("bridge:get-meet-self-mic", () => meetCallTracker.selfMic);
   ipcMain.handle("translationRoom:join", async () => undefined);
   ipcMain.handle("translationRoom:leave", async () => undefined);
 
@@ -414,9 +606,9 @@ function registerIpcHandlers(): void {
    * popup writes is visible to the main window. Main relays instead.
    */
   ipcMain.handle("bridge:activate-room", (_event, roomId: string) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("bridge:room-activated", roomId);
-    }
+    // Every window that may listen, like `bridge:meet-mic-state`. Only the main window's app shell
+    // subscribes today; the popup's route (/desktop-transcript) never registers, so it ignores it.
+    sendToWindows([mainWindow, transcriptPanel.window], "bridge:room-activated", roomId);
   });
   ipcMain.handle("bridge:close-transcript-window", () => {
     // Withdrawn before it is closed, so the `closed` handler knows this one was asked for and
@@ -724,6 +916,27 @@ function announceBridgeWindow(): void {
 }
 
 /**
+ * Says that the meeting is being recorded, the first time the Meet window is handed to a recording
+ * for a room (WT-910).
+ *
+ * That grant skips the screen-share dialog, so nothing the OS draws says a capture began; Chromium's
+ * own "sharing" bar belongs to the page. The user opted in through the popup, and this is the
+ * receipt that survives not looking at the popup. Once per room per app session: a renderer that
+ * re-arms after a reload is not news.
+ */
+function announceMeetingRecording(): void {
+  if (!Notification.isSupported()) return;
+
+  const notification = new Notification({
+    title: "Recording this meeting",
+    body: `${APP_NAME} is recording your Google Meet window for this meeting.`,
+    icon: getDesktopAssetPath(APP_ICON_FILE),
+  });
+  notification.on("click", () => revealMainWindow());
+  notification.show();
+}
+
+/**
  * The signed-out prompt: the user is in a Google Meet call and nobody is signed in to WarpTalk.
  *
  * A notification and nothing more - no window raised, nothing focused. Clicking it shows the main
@@ -812,6 +1025,12 @@ async function openTranscriptWindow(
     // Small and unobtrusive: it sits over a browser window for the whole meeting.
     skipTaskbar: false,
     webPreferences: {
+      /**
+       * Same as the main window. The popup sits behind Meet for most of a call, and its timers are
+       * load-bearing: the consent raise/grace and the relay timeouts. Throttled, a "no answer"
+       * grace stretched to a minute and relay requests timed out late.
+       */
+      backgroundThrottling: false,
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
       nodeIntegration: false,
@@ -1214,7 +1433,22 @@ function launchWindow(): void {
  * to be chosen here.
  */
 function registerDisplayMediaHandler(): void {
-  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+    // The armed Meet window grant (WT-910), spent here and only here: the requesting frame's
+    // webContents must be the one that armed it, within its 10 s. Video only — the meeting's audio
+    // already reaches the room through the loopback capture, and a second copy would double it.
+    // Everything that is not that request falls through to the dialog below, unchanged.
+    if (request.videoRequested && request.frame) {
+      const requester = webContents.fromFrame(request.frame);
+      const grant = requester ? meetWindowCaptureArm.take(requester.id, Date.now()) : null;
+      if (grant) {
+        console.log("Granting the armed Meet window capture without a picker.");
+        callback({ video: grant.source });
+        if (grant.firstForRoom) announceMeetingRecording();
+        return;
+      }
+    }
+
     void (async () => {
       // macOS refuses to enumerate screens until Screen Recording is granted,
       // and cannot be prompted from here — the first capture attempt is what
@@ -1478,6 +1712,7 @@ if (!app.requestSingleInstanceLock()) {
     // child and is stopped here rather than repeating that.
     signedOutMeetPrompt.dispose();
     meetPresenceWatcher.disarm();
+    meetCallTracker.reset();
     meetUrlSensor.stop();
     meetCaptionStream.stop();
     meetCaptionSensor.stop();

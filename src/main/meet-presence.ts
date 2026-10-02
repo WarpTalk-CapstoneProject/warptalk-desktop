@@ -59,6 +59,14 @@ export class MeetPresenceWatcher {
    * hands the renderer more of the machine than it needs. Capture targeting reads it here.
    */
   private lastProcessId: number | null = null;
+  /**
+   * The HWND behind the last sighting, for the same reason and with the same rule as
+   * `lastProcessId`: main-process only, never part of `MeetPresence`. Recording the meeting
+   * (meet-window-capture.ts) reads it to pick the window source without a picker.
+   */
+  private lastWindowHandle: number | null = null;
+  /** Which read the last sighting came from: a normal tab ("document") or Chrome's PiP window. */
+  private lastVia: "document" | "pip" | null = null;
 
   private readonly options: MeetPresenceWatcherOptions;
 
@@ -73,6 +81,21 @@ export class MeetPresenceWatcher {
   /** The browser process the last sighting belonged to, for aiming capture. Main-process only. */
   get meetProcessId(): number | null {
     return this.lastProcessId;
+  }
+
+  /** The window the last sighting was read from, for window capture. Main-process only. */
+  get meetWindowHandle(): number | null {
+    return this.lastWindowHandle;
+  }
+
+  /** Whether the last sighting was Chrome's picture-in-picture window rather than the Meet tab. */
+  get meetWindowVia(): "document" | "pip" | null {
+    return this.lastVia;
+  }
+
+  /** Whether the last poll saw a Meet window. False while disarmed or before the first answer. */
+  get meetWindowVisible(): boolean {
+    return this.last?.meetWindowVisible === true;
   }
 
   /** Idempotent: arming an armed watcher keeps the one interval it already has. */
@@ -91,6 +114,8 @@ export class MeetPresenceWatcher {
     // observation from a previous meeting and staying silent because nothing "changed".
     this.last = null;
     this.lastProcessId = null;
+    this.lastWindowHandle = null;
+    this.lastVia = null;
     this.polling = false;
   }
 
@@ -124,6 +149,8 @@ export class MeetPresenceWatcher {
     // why the field is optional and why nothing downstream may require it to believe a sighting.
     if (sighting?.meetCode) presence.meetCode = sighting.meetCode;
     this.lastProcessId = sighting?.processId ?? null;
+    this.lastWindowHandle = sighting?.windowHandle ?? null;
+    this.lastVia = sighting?.via ?? null;
 
     if (
       this.last &&

@@ -2,6 +2,7 @@ import type { MeetCaptionEvent, MeetCaptionStatus } from "../shared/types.ts";
 
 /**
  * Holds Meet caption events while no renderer is listening, so a hint is not lost to a reload.
+ * Every event leaves through here stamped with `sentAtMs` (see `deliver`).
  *
  * The transport is UIA (main) -> hidden main window (renderer, owns the hub connection) -> gateway
  * hub -> Redis. Main reads captions whether or not that renderer is there to take them: the window
@@ -48,7 +49,7 @@ export class MeetCaptionBuffer {
 
   event(event: MeetCaptionEvent): void {
     if (this.subscribed) {
-      this.send(event);
+      this.deliver(event);
       return;
     }
     this.queue.push({ at: this.now(), event });
@@ -72,7 +73,7 @@ export class MeetCaptionBuffer {
     this.queue = [];
     if (this.lastStatus && this.lastStatus.meetCode === meetCode) this.sendStatus(this.lastStatus);
     for (const entry of queued) {
-      if (entry.event.meetCode === meetCode) this.send(entry.event);
+      if (entry.event.meetCode === meetCode) this.deliver(entry.event);
     }
   }
 
@@ -85,6 +86,15 @@ export class MeetCaptionBuffer {
   clear(): void {
     this.queue = [];
     this.lastStatus = null;
+  }
+
+  /**
+   * Stamps `sentAtMs` with `now()` (alignedNow in main) at send time, live or replayed, so the
+   * renderer can move the event's times onto its own Date.now() axis. A copy: the buffered entry
+   * is never mutated.
+   */
+  private deliver(event: MeetCaptionEvent): void {
+    this.send({ ...event, sentAtMs: this.now() });
   }
 
   private prune(): void {
