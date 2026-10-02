@@ -7,6 +7,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 import type {
+  ArmMeetWindowCaptureResult,
   AudioCaptureState,
   AudioCaptureStopped,
   DesktopRuntimeCapability,
@@ -134,6 +135,9 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.on("bridge:meet-mic-state", listener);
     return () => ipcRenderer.off("bridge:meet-mic-state", listener);
   },
+  // One-shot: the next getDisplayMedia from the main window takes the sighted Meet window (WT-910).
+  armMeetWindowCapture: (roomId: string): Promise<ArmMeetWindowCaptureResult> =>
+    ipcRenderer.invoke("bridge:arm-meet-window-capture", roomId),
 
   minimize: (): void => ipcRenderer.send("window:minimize"),
   maximize: (): void => ipcRenderer.send("window:maximize"),
