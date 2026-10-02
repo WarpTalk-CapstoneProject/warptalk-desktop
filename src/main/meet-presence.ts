@@ -75,6 +75,11 @@ export class MeetPresenceWatcher {
     return this.lastProcessId;
   }
 
+  /** Whether the last poll saw a Meet window. False while disarmed or before the first answer. */
+  get meetWindowVisible(): boolean {
+    return this.last?.meetWindowVisible === true;
+  }
+
   /** Idempotent: arming an armed watcher keeps the one interval it already has. */
   arm(): void {
     if (this.timer) return;

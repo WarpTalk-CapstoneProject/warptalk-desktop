@@ -7,6 +7,8 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 import type {
+  AudioCaptureState,
+  AudioCaptureStopped,
   DesktopRuntimeCapability,
   EnsureMeetCaptionsResult,
   MeetCaptionEvent,
@@ -31,6 +33,13 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.invoke("audio:start-capture", request),
   stopAudioCapture: (): Promise<void> =>
     ipcRenderer.invoke("audio:stop-capture"),
+  getCaptureState: (): Promise<AudioCaptureState> =>
+    ipcRenderer.invoke("audio:get-capture-state"),
+  onAudioCaptureStopped: (callback: (event: AudioCaptureStopped) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, event: AudioCaptureStopped) => callback(event);
+    ipcRenderer.on("audio:capture-stopped", listener);
+    return () => ipcRenderer.off("audio:capture-stopped", listener);
+  },
   onWindowsLoopbackPcmChunk: (callback: (chunk: WindowsLoopbackPcmChunk) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, chunk: WindowsLoopbackPcmChunk) => callback(chunk);
     ipcRenderer.on("audio:loopback-pcm-chunk", listener);

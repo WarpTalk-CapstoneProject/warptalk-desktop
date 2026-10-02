@@ -10,6 +10,10 @@ export interface WarpTalkAPI {
   listWindowsLoopbackSources: () => Promise<WindowsLoopbackSource[]>;
   startAudioCapture: (request?: WindowsLoopbackCaptureRequest) => Promise<WindowsLoopbackStartResult>;
   stopAudioCapture: () => Promise<void>;
+  /** What main is capturing right now. Absent on builds that predate it. */
+  getCaptureState?: () => Promise<AudioCaptureState>;
+  /** Main stopped a capture by itself (one started with `stopWhenMeetGone`). Main window only. */
+  onAudioCaptureStopped?: (callback: (event: AudioCaptureStopped) => void) => () => void;
   onWindowsLoopbackPcmChunk: (callback: (chunk: WindowsLoopbackPcmChunk) => void) => () => void;
   joinTranslationRoom: (translationRoomId: string) => Promise<void>;
   leaveTranslationRoom: () => Promise<void>;
@@ -183,6 +187,35 @@ export interface WindowsLoopbackCaptureRequest {
    * Absent or "voice": the old contract, which requires VB-CABLE (B2 driver-missing without it).
    */
   mode?: "voice" | "text-only";
+  /**
+   * "meet-sighting": main aims the capture at the browser process behind the current Google Meet
+   * sighting and ignores `sourceId`/`targetProcessId`. Refused with R8 `meet-sighting-missing` (no
+   * sighting) or `meet-sighting-no-process` (a platform that cannot name the process); the renderer
+   * then falls back to its picker. Older builds ignore the field.
+   */
+  target?: "meet-sighting";
+  /**
+   * Only with `target: "meet-sighting"`: main stops the capture itself once Meet has been out of
+   * sight for the grace (capture-target.ts) and sends `audio:capture-stopped`. Absent = today's
+   * behaviour, the capture runs until the renderer stops it.
+   */
+  stopWhenMeetGone?: boolean;
+}
+
+/** How the running capture was aimed. */
+export type CaptureStartedVia = "meet-sighting" | "source" | "process-id";
+
+/** `audio:get-capture-state`: what main is capturing, for a main window that reloaded mid-meeting. */
+export interface AudioCaptureState {
+  capturing: boolean;
+  mode: "voice" | "text-only" | null;
+  targetProcessId: number | null;
+  startedVia: CaptureStartedVia | null;
+}
+
+/** `audio:capture-stopped`: main stopped a capture on its own. */
+export interface AudioCaptureStopped {
+  reason: "meet-gone";
 }
 
 export type WindowsLoopbackStartResult =
@@ -203,7 +236,9 @@ export type WindowsLoopbackStartResult =
         | "pcm-to-track-bridge-not-ready"
         | "silence-padding-not-ready"
         | "target-process-resolver-not-ready"
-        | "target-is-warptalk";
+        | "target-is-warptalk"
+        | "meet-sighting-missing"
+        | "meet-sighting-no-process";
     };
 
 export interface WindowsLoopbackSource {

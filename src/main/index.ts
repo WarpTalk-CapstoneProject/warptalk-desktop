@@ -28,6 +28,13 @@ import {
   WindowsLoopbackRuntime,
 } from "./windows-loopback-runtime";
 import { MeetPresenceWatcher } from "./meet-presence";
+import {
+  captureStateOf,
+  MeetGoneCaptureGuard,
+  prepareCaptureRequest,
+  sendToWindows,
+  type CaptureStartedVia,
+} from "./capture-target";
 import { MeetUrlSensor } from "./meet-url-sensor";
 import { MacMeetUrlSensor } from "./meet-url-sensor-mac";
 import { MeetCaptionSensor } from "./meet-caption-sensor";
@@ -54,7 +61,13 @@ import {
 } from "./updater";
 import { trayBadged, trayTooltip, trayUpdateLabel } from "./update-policy";
 import { withUpdateDot } from "./tray-badge";
-import type { EnsureMeetCaptionsResult, MeetMicState, MeetPresence } from "../shared/types";
+import type {
+  AudioCaptureState,
+  AudioCaptureStopped,
+  EnsureMeetCaptionsResult,
+  MeetMicState,
+  MeetPresence,
+} from "../shared/types";
 import {
   describeWindowsLoopbackSources,
   resolveWindowOwnerProcessId,
@@ -90,6 +103,8 @@ let trayIcon: Electron.NativeImage | null = null;
 let trayIconBadged: Electron.NativeImage | null = null;
 /** Whether the renderer has a loopback capture running, i.e. a bridge meeting is being translated. */
 let loopbackCapturing = false;
+/** How the running capture was aimed, for `audio:get-capture-state`. Null while none runs. */
+let captureStartedVia: CaptureStartedVia | null = null;
 /** Set once the app has decided to quit, before any window is asked to close. See quit-lifecycle.ts. */
 let isQuitting = false;
 /**
@@ -127,6 +142,24 @@ const meetPresenceWatcher = new MeetPresenceWatcher({
       mainWindow.webContents.send("bridge:meet-presence", presence);
     }
     signedOutMeetPrompt.presence(presence);
+    meetGoneCaptureGuard.observe(presence);
+  },
+});
+
+/**
+ * Stops a capture aimed by the Meet sighting once Meet has been gone for the grace, when the
+ * renderer asked for that (`stopWhenMeetGone`). See capture-target.ts for the grace and why it is
+ * long. The main window is told, and handles it like any other capture failure.
+ */
+const meetGoneCaptureGuard = new MeetGoneCaptureGuard({
+  isWatching: () => meetPresenceWatcher.armed,
+  onGone: () => {
+    loopbackCapturing = false;
+    captureStartedVia = null;
+    void windowsLoopbackRuntime.stop();
+    const event: AudioCaptureStopped = { reason: "meet-gone" };
+    console.log("Loopback capture stopped: Meet out of sight past the grace.");
+    sendToWindows([mainWindow], "audio:capture-stopped", event);
   },
 });
 
@@ -252,15 +285,38 @@ function registerIpcHandlers(): void {
   ipcMain.handle("app:open-external", async (_event, url: string) => {
     openExternalUrl(url);
   });
-  ipcMain.handle("audio:start-capture", async (_event, request) => {
-    const result = await windowsLoopbackRuntime.start(request);
+  ipcMain.handle("audio:start-capture", async (_event, request: unknown) => {
+    // `target: "meet-sighting"` only fills in the PID from main's own sighting; every gate in the
+    // runtime (R1 never-ourselves, consent, readiness...) still runs on the result.
+    const prepared = prepareCaptureRequest(request, {
+      armed: meetPresenceWatcher.armed,
+      visible: meetPresenceWatcher.meetWindowVisible,
+      processId: meetPresenceWatcher.meetProcessId,
+    });
+    if (!("ok" in prepared)) return prepared;
+    // A new start replaces the old capture inside the runtime; its stop-on-gone goes with it.
+    meetGoneCaptureGuard.end();
+    const result = await windowsLoopbackRuntime.start(prepared.request);
     loopbackCapturing = result.started;
+    captureStartedVia = result.started ? prepared.startedVia : null;
+    if (result.started && prepared.stopWhenMeetGone) meetGoneCaptureGuard.begin();
     return result;
   });
   ipcMain.handle("audio:stop-capture", async () => {
     loopbackCapturing = false;
+    captureStartedVia = null;
+    meetGoneCaptureGuard.end();
     return windowsLoopbackRuntime.stop();
   });
+  // For a main window that reloaded mid-meeting: the capture lives in main and outlives it.
+  ipcMain.handle("audio:get-capture-state", (): AudioCaptureState =>
+    captureStateOf({
+      capturing: loopbackCapturing,
+      mode: windowsLoopbackRuntime.activeMode,
+      targetProcessId: windowsLoopbackRuntime.activeTargetProcessId,
+      startedVia: captureStartedVia,
+    }),
+  );
   // Arm/disarm rather than a query: the renderer would otherwise have to poll main, which polls
   // the OS, and two loops out of step is how a widget ends up a few seconds behind the meeting.
   ipcMain.handle("bridge:watch-meet-presence", () => {
@@ -414,9 +470,9 @@ function registerIpcHandlers(): void {
    * popup writes is visible to the main window. Main relays instead.
    */
   ipcMain.handle("bridge:activate-room", (_event, roomId: string) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("bridge:room-activated", roomId);
-    }
+    // Every window that may listen, like `bridge:meet-mic-state`. Only the main window's app shell
+    // subscribes today; the popup's route (/desktop-transcript) never registers, so it ignores it.
+    sendToWindows([mainWindow, transcriptPanel.window], "bridge:room-activated", roomId);
   });
   ipcMain.handle("bridge:close-transcript-window", () => {
     // Withdrawn before it is closed, so the `closed` handler knows this one was asked for and
@@ -812,6 +868,12 @@ async function openTranscriptWindow(
     // Small and unobtrusive: it sits over a browser window for the whole meeting.
     skipTaskbar: false,
     webPreferences: {
+      /**
+       * Same as the main window. The popup sits behind Meet for most of a call, and its timers are
+       * load-bearing: the consent raise/grace and the relay timeouts. Throttled, a "no answer"
+       * grace stretched to a minute and relay requests timed out late.
+       */
+      backgroundThrottling: false,
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
       nodeIntegration: false,
