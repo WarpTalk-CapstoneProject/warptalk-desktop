@@ -12,6 +12,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  nativeTheme,
   Notification,
   session,
   shell,
@@ -29,6 +30,7 @@ import {
   WindowsLoopbackRuntime,
 } from "./windows-loopback-runtime";
 import { MeetPresenceWatcher } from "./meet-presence";
+import { RendererCrashGuard, windowBackgroundColor } from "./renderer-recovery";
 import {
   captureStateOf,
   MeetGoneCaptureGuard,
@@ -678,6 +680,46 @@ function isDesktopLandingUrl(url: string, trustedOrigin: string): boolean {
   }
 }
 
+/**
+ * WT-930: a window whose page process dies is reloaded instead of being left blank, and asks the
+ * user once it keeps dying. See renderer-recovery.ts. One guard per window, so a popup that crashes
+ * does not use up the main window's reloads.
+ *
+ * Hangs are only reported: a page that stops responding usually comes back, and reloading it would
+ * throw away a meeting that was merely slow.
+ */
+function watchRendererHealth(win: BrowserWindow, label: "main" | "popup"): void {
+  const guard = new RendererCrashGuard();
+  win.webContents.on("render-process-gone", (_event, details) => {
+    const action = guard.decide(details.reason, { isQuitting });
+    console.error(
+      `[renderer] ${label} page process gone (${details.reason}, exit ${details.exitCode}): ${action}`,
+    );
+    if (action === "ignore" || win.isDestroyed()) return;
+    if (action === "reload") {
+      win.webContents.reload();
+      return;
+    }
+    void dialog
+      .showMessageBox(win, {
+        type: "error",
+        title: WINDOW_TITLE,
+        message: "WarpTalk stopped working in this window.",
+        detail: "It was reloaded but stopped again. Reload it once more, or quit WarpTalk from the tray.",
+        buttons: ["Reload", "Not now"],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      .then(({ response }) => {
+        if (response !== 0 || win.isDestroyed()) return;
+        guard.reset();
+        win.webContents.reload();
+      });
+  });
+  win.on("unresponsive", () => console.warn(`[renderer] ${label} window stopped responding`));
+  win.on("responsive", () => console.warn(`[renderer] ${label} window is responding again`));
+}
+
 async function createWindow(): Promise<void> {
   const win = new BrowserWindow({
     width: 1200,
@@ -687,6 +729,8 @@ async function createWindow(): Promise<void> {
     title: WINDOW_TITLE,
     icon: getDesktopAssetPath(APP_ICON_FILE),
     autoHideMenuBar: true,
+    // WT-930: never a bare white. See windowBackgroundColor.
+    backgroundColor: windowBackgroundColor(nativeTheme.shouldUseDarkColors),
     webPreferences: {
       /**
        * This window does realtime audio work while nobody is looking at it, which is not an edge
@@ -744,6 +788,7 @@ async function createWindow(): Promise<void> {
     }
   });
   win.webContents.on("render-process-gone", () => meetCaptionBuffer.unsubscribe());
+  watchRendererHealth(win, "main");
   win.webContents.on("did-finish-load", () => signedOutMeetPrompt.pageLoaded());
 
   // Minimize to tray instead of closing - except while quitting, when cancelling the close would
@@ -1022,6 +1067,7 @@ async function openTranscriptWindow(
     alwaysOnTop: true,
     show: false,
     autoHideMenuBar: true,
+    backgroundColor: windowBackgroundColor(nativeTheme.shouldUseDarkColors),
     // Small and unobtrusive: it sits over a browser window for the whole meeting.
     skipTaskbar: false,
     webPreferences: {
@@ -1038,6 +1084,7 @@ async function openTranscriptWindow(
     },
   });
   transcriptPanel.shown(win, roomId);
+  watchRendererHealth(win, "popup");
 
   /**
    * Revealed on first paint, not after `loadURL` resolves.
