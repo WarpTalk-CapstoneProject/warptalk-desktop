@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "HAND-WRITTEN, not a dump. There is no UIA dump of Meet's picture-in-picture window: the tree",
+    "dump script reads a normal tab. These two surfaces are written from a live read-only probe on",
+    "2026-10-02 (Chrome, Windows 11, Vietnamese Meet UI), which recorded: a separate top-level",
+    "Chrome_WidgetWin_1 window named exactly 'Meet - <code>' (about 394x497), holding a Document",
+    "with an empty Name and URL about:blank, and inside it a mic button, a camera button and Leave.",
+    "Recorded per button: its Name and the class tokens that differ (mic on 'aLTxue jfzJEe', mic",
+    "muted 'Y3DJRd ZAsEvd', Leave 'RnWvU xCYCgd'). NOT recorded: the order of the tokens inside the",
+    "class string, the camera's tokens in PiP, and any other button the window may hold - the stem",
+    "and the camera row below are filled in from the tab dumps beside this file. Shape: the",
+    "MeetSurface the helper returns (meet-call-state.ts), not the tree shape of the other fixtures."
+  ],
+  "micOn": {
+    "surface": "pip",
+    "meetCode": "hqw-cmis-waa",
+    "processId": 4242,
+    "minimized": false,
+    "truncated": false,
+    "buttons": [
+      { "n": "Tắt micrô", "c": "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe aLTxue jfzJEe EXoIMe" },
+      { "n": "Tắt máy ảnh", "c": "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe aLTxue jfzJEe EXoIMe" },
+      { "n": "Rời khỏi cuộc gọi", "c": "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe RnWvU xCYCgd EXoIMe" }
+    ]
+  },
+  "micMuted": {
+    "surface": "pip",
+    "meetCode": "hqw-cmis-waa",
+    "processId": 4242,
+    "minimized": false,
+    "truncated": false,
+    "buttons": [
+      { "n": "Bật micrô", "c": "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe EXoIMe Y3DJRd ZAsEvd" },
+      { "n": "Tắt máy ảnh", "c": "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe aLTxue jfzJEe EXoIMe" },
+      { "n": "Rời khỏi cuộc gọi", "c": "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe RnWvU xCYCgd EXoIMe" }
+    ]
+  }
+}
