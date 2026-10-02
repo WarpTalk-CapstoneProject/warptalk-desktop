@@ -126,6 +126,27 @@ export interface VirtualAudioStatus {
    *   voice.cableInstalled=false   voice is not possible until VB-CABLE is installed
    */
   bridgeModes?: BridgeModeAvailability;
+  /**
+   * The endpoint labels the renderer matches in `enumerateDevices` (case-insensitive substring) to
+   * find each leg's device id, for the provider pair this machine is on. Absent on desktop builds
+   * that predate it and where `supported` is false. See main/virtual-audio.ts.
+   */
+  endpointLabels?: BridgeEndpointLabels;
+}
+
+export interface BridgeEndpointLabels {
+  outboundProviderId: string;
+  /** Render endpoint WarpTalk plays the dub into (`audiooutput`). */
+  outboundSink: string;
+  /** Capture endpoint the user selects as Meet's microphone (`audioinput`). */
+  meetMicrophone: string;
+  inboundProviderId: string | null;
+  /** Capture endpoint WarpTalk records the far side from (`audioinput`). */
+  inboundCapture: string | null;
+  /** Render endpoint Meet's speaker is pointed at when the far side comes back on the device. */
+  meetSpeaker: string | null;
+  /** The bridge still runs without the inbound device (Windows: loopback or outbound-only). */
+  inboundOptional: boolean;
 }
 
 export interface BridgeModeAvailability {
