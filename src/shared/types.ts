@@ -82,6 +82,18 @@ export interface WarpTalkAPI {
    * (started with consent) to be running. Absent on desktop builds that predate it.
    */
   armMeetWindowCapture?: (roomId: string) => Promise<ArmMeetWindowCaptureResult>;
+  /**
+   * Whether the user is in the Google Meet call (not merely on its page), and whether Meet's own
+   * microphone button is muted - read from Meet's buttons through UI Automation, in the tab or in
+   * Chrome's picture-in-picture window (Windows only). No stream to switch on: both ride on the
+   * presence watch (`watchMeetPresence`) and are silent while it is disarmed. Events arrive only
+   * on a change; the getters give the current value to a subscriber that came late. All optional:
+   * absent on desktop builds that predate them.
+   */
+  onMeetCallState?: (callback: (state: MeetCallState) => void) => () => void;
+  getMeetCallState?: () => Promise<MeetCallState>;
+  onMeetSelfMic?: (callback: (mic: MeetSelfMic) => void) => () => void;
+  getMeetSelfMic?: () => Promise<MeetSelfMic>;
   minimize: () => void;
   maximize: () => void;
   close: () => void;
@@ -397,6 +409,63 @@ export interface MeetMicState {
     | "unsupported-platform";
   /** Date.now() of the read. */
   at: number;
+}
+
+/**
+ * `bridge:meet-call-state`: where the user stands with the Google Meet call. See meet-call-state.ts.
+ *
+ *   lobby    on the meeting's page with a mic button but no Leave button: the green room.
+ *   in-call  a Leave button is showing, in the tab (`via:"tab"`) or in Chrome's picture-in-picture
+ *            window (`via:"pip"`).
+ *   left     a readable Meet page for this code with the call controls gone ("You left the
+ *            meeting"). Reported only after it held for two reads about 1.5 s apart. It is also
+ *            what a page the user never joined from looks like, so end a room on it only after an
+ *            `in-call` for the same `meetCode`.
+ *   unknown  nothing readable: no Meet tab is the ACTIVE tab of a window and there is no PiP window
+ *            (UI Automation cannot see a background tab), the buttons could not be recognised,
+ *            the read failed, the watch is disarmed, or the platform has no sensor. It never
+ *            means the call ended - keep whatever was believed before.
+ *
+ * `reason` is a fixed vocabulary for logs and diagnostics ("leave-button-class",
+ * "leave-button-name", "pip-mic-button", "mic-button-no-leave", "rejoin-button",
+ * "no-call-controls", "no-meet-surface", "controls-unrecognised", "empty-tree",
+ * "listing-truncated", "pip-without-controls", "probe-failed", "not-watching",
+ * "unsupported-platform"); do not branch on it.
+ */
+export interface MeetCallState {
+  phase: "lobby" | "in-call" | "left" | "unknown";
+  via: "tab" | "pip" | null;
+  meetCode: string | null;
+  reason: string;
+  /** Date.now() in main when this state was established. */
+  atMs: number;
+}
+
+/**
+ * `bridge:meet-self-mic`: what Meet's own microphone button says.
+ *
+ * Not `MeetMicState` (`bridge:meet-mic-state`), which is unchanged and answers a different
+ * question: which DEVICE the browser records from (cable or a real mic), from Windows Core Audio.
+ * Core Audio cannot see mute - a muted Meet keeps the microphone open - so mute comes from here.
+ *
+ *   muted  true / false as Meet shows it; null when it is not known (never read, the call was
+ *          left, or the button's name and class contradicted each other).
+ *   stale  `muted` is the LAST value read, not a current one: Meet is out of sight (background
+ *          tab without PiP), the read failed, or the window is minimized. Do not act on a stale
+ *          value as if the user had just pressed the button.
+ *   via    "class" = Meet's class tokens (language-independent), "name" = the button's label
+ *          (the fallback when the classes change). Diagnostics only.
+ *
+ * In the lobby the value is the mic the user will join with; whether to act on it before
+ * `MeetCallState.phase` is "in-call" is the consumer's decision.
+ */
+export interface MeetSelfMic {
+  muted: boolean | null;
+  stale: boolean;
+  via: "class" | "name" | null;
+  meetCode: string | null;
+  /** Date.now() in main when this reading was established. */
+  atMs: number;
 }
 
 export interface WindowsLoopbackPcmChunk {

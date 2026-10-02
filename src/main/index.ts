@@ -54,6 +54,7 @@ import {
   singleFlight,
 } from "./meet-captions";
 import { MeetMicStateStream, MicSessionSensor } from "./meet-mic-state";
+import { MeetCallStateTracker } from "./meet-call-state";
 import { TranscriptPanelLedger } from "./transcript-panel";
 import { SignedOutMeetPrompt } from "./signed-out-meet-prompt";
 import { trayMenuTemplate } from "./tray-menu";
@@ -142,14 +143,66 @@ const audioRuntime = new AudioRuntimeService();
  */
 const meetUrlSensor = process.platform === "darwin" ? new MacMeetUrlSensor() : new MeetUrlSensor();
 
+/**
+ * In the call or not, and Meet's own mute button - `bridge:meet-call-state` and
+ * `bridge:meet-self-mic` (meet-call-state.ts). Windows only: the macOS sensor asks the browser
+ * for an address and never sees a button, so there the tracker only ever says "unknown".
+ *
+ * It has no arm of its own. Every presence look feeds it (the read below), and while presence has
+ * Meet in sight it runs a faster read on the same helper so a mute arrives in about a second
+ * rather than three. Both windows get the events: the main window carries the meeting session,
+ * the bridge popup is what the user is looking at.
+ */
+const meetCallTracker = new MeetCallStateTracker({
+  probe:
+    meetUrlSensor instanceof MeetUrlSensor
+      ? async () => (await meetUrlSensor.scan("state")).surfaces
+      : null,
+  emitCallState: (state) => {
+    console.log("Meet call state:", JSON.stringify(state));
+    sendToWindows([mainWindow, transcriptPanel.window], "bridge:meet-call-state", state);
+    observeMeetForCaptureGuard();
+  },
+  emitSelfMic: (mic) => {
+    sendToWindows([mainWindow, transcriptPanel.window], "bridge:meet-self-mic", mic);
+  },
+});
+
+/** The presence look, which on Windows also carries the buttons the call-state tracker reads. */
+async function readMeetSighting(): Promise<Awaited<ReturnType<MeetUrlSensor["read"]>>> {
+  if (!(meetUrlSensor instanceof MeetUrlSensor)) return meetUrlSensor.read();
+  try {
+    const scan = await meetUrlSensor.scan("look");
+    meetCallTracker.ingest(scan.surfaces);
+    return scan.sighting;
+  } catch (error) {
+    meetCallTracker.ingestFailure();
+    throw error;
+  }
+}
+
+/**
+ * What the stop-when-Meet-is-gone guard is told. A "you left the meeting" page still counts as a
+ * Meet window for presence (the address is still Meet's), but for a capture it is exactly the case
+ * the guard exists for: the call is over and the browser's next sound would flow into the room.
+ * So `left` counts as gone here. It is reported only after it held (see the tracker), the guard
+ * then waits its own 60 s, and a rejoin - or the picture-in-picture window - cancels it.
+ */
+function observeMeetForCaptureGuard(): void {
+  meetGoneCaptureGuard.observe({
+    meetWindowVisible: meetPresenceWatcher.meetWindowVisible && meetCallTracker.callState.phase !== "left",
+  });
+}
+
 const meetPresenceWatcher = new MeetPresenceWatcher({
-  readMeetSighting: () => meetUrlSensor.read(),
+  readMeetSighting,
   onChange: (presence: MeetPresence) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("bridge:meet-presence", presence);
     }
     signedOutMeetPrompt.presence(presence);
-    meetGoneCaptureGuard.observe(presence);
+    meetCallTracker.setPolling(presence.meetWindowVisible);
+    observeMeetForCaptureGuard();
   },
 });
 
@@ -183,6 +236,7 @@ const signedOutMeetPrompt = new SignedOutMeetPrompt({
   armWatcher: () => meetPresenceWatcher.arm(),
   disarmWatcher: () => {
     meetPresenceWatcher.disarm();
+    meetCallTracker.reset();
     // Same as the web app's disarm: the helper shell would otherwise outlive the watch.
     meetUrlSensor.stop();
   },
@@ -315,7 +369,11 @@ function registerIpcHandlers(): void {
     const result = await windowsLoopbackRuntime.start(prepared.request);
     loopbackCapturing = result.started;
     captureStartedVia = result.started ? prepared.startedVia : null;
-    if (result.started && prepared.stopWhenMeetGone) meetGoneCaptureGuard.begin();
+    if (result.started && prepared.stopWhenMeetGone) {
+      meetGoneCaptureGuard.begin();
+      // A capture aimed at a "you left" page starts its countdown now, not at the next change.
+      observeMeetForCaptureGuard();
+    }
     return result;
   });
   ipcMain.handle("audio:stop-capture", async () => {
@@ -396,6 +454,7 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle("bridge:unwatch-meet-presence", () => {
     meetPresenceWatcher.disarm();
+    meetCallTracker.reset();
     // The helper is one long-lived shell. Disarming without killing it would leave a PowerShell
     // process alive for the rest of the session, polling nothing.
     meetUrlSensor.stop();
@@ -502,6 +561,10 @@ function registerIpcHandlers(): void {
       meetMicStream.start();
     }
   });
+  // The current values, for a renderer that subscribed after the last change (a reload, the popup
+  // opening mid-call). The events themselves are sent on change only.
+  ipcMain.handle("bridge:get-meet-call-state", () => meetCallTracker.callState);
+  ipcMain.handle("bridge:get-meet-self-mic", () => meetCallTracker.selfMic);
   ipcMain.handle("translationRoom:join", async () => undefined);
   ipcMain.handle("translationRoom:leave", async () => undefined);
 
@@ -1647,6 +1710,7 @@ if (!app.requestSingleInstanceLock()) {
     // child and is stopped here rather than repeating that.
     signedOutMeetPrompt.dispose();
     meetPresenceWatcher.disarm();
+    meetCallTracker.reset();
     meetUrlSensor.stop();
     meetCaptionStream.stop();
     meetCaptionSensor.stop();

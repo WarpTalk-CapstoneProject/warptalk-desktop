@@ -17,6 +17,10 @@
  *                   Believed only when BOTH hold: the document is `about:blank`, and the label is
  *                   outside the Document subtree. The search used to cover every window and every
  *                   descendant, so any page whose text said "meet.google.com" read as a call.
+ *                   On 2026-10-02 this label read did NOT recognise Chrome's PiP window for a
+ *                   live call, so a second read now backs it: the window titled `Meet - <code>`
+ *                   over `about:blank` with a call control inside. See meet-call-state.ts, which
+ *                   also says what that read can and cannot be trusted for.
  *
  * WHY A LONG-LIVED HELPER AND NOT A SHELL PER POLL
  *   Measured on the target machine: spawning PowerShell per read costs 1.8-3.4 s once the UI
@@ -34,6 +38,13 @@ import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+
+import {
+  MEET_SURFACE_SCRIPT,
+  parseMeetSurfaces,
+  sightingFromScan,
+  type MeetSurface,
+} from "./meet-call-state.ts";
 
 /** What one look at the machine found. Null means no Meet window, not "we could not look". */
 export interface MeetSighting {
@@ -56,6 +67,16 @@ export interface MeetSighting {
 }
 
 /**
+ * One look, whole: the sighting, and every place Meet is showing with the buttons it shows there.
+ * The buttons are what tell a call from the lobby and from the "you left" page, which share one
+ * address. See meet-call-state.ts, which owns everything decided from them.
+ */
+export interface MeetScan {
+  sighting: MeetSighting | null;
+  surfaces: MeetSurface[];
+}
+
+/**
  * Answers one question per line on stdin, so the caller keeps the clock.
  *
  * The script self-polling would mean two independent intervals for one job. Here PowerShell is a
@@ -63,6 +84,8 @@ export interface MeetSighting {
  */
 export const SENSOR_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+# Button names come back in Meet's UI language; without this PowerShell 5.1 writes them as ANSI.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type @'
 using System;using System.Text;using System.Runtime.InteropServices;
@@ -71,6 +94,7 @@ public class MeetWin {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h,StringBuilder s,int n);
   [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr h,out int pid);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   public delegate bool EnumProc(IntPtr h,IntPtr p);
 }
 '@
@@ -135,6 +159,9 @@ function Read-Window($w) {
 
   $value = ''
   try { $value = $doc.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch {}
+  # Handed to Get-MeetSurface (meet-call-state.ts), so the button read does not find them twice.
+  $script:doc = $doc
+  $script:docValue = $value
   if ($value -match '^https?://') {
     try {
       $uri = [Uri]$value
@@ -166,22 +193,16 @@ function Read-Window($w) {
   return $null
 }
 
+${MEET_SURFACE_SCRIPT}
+# 'look' enumerates every browser window; 'state' re-reads only the windows Meet was last found in
+# (meet-call-state.ts). Both answer in the same shape.
 while ($true) {
   $line = [Console]::In.ReadLine()
   if ($line -eq $null) { break }
-  if ($line -ne 'look') { continue }
+  if ($line -ne 'look' -and $line -ne 'state') { continue }
   try {
-    $hit = $null
-    foreach ($w in (Get-BrowserWindows)) {
-      $r = Read-Window $w
-      # A normal window wins over a picture-in-picture one: it carries the room code.
-      if ($r -ne $null) { $hit = $r; if ($r.via -eq 'document') { break } }
-    }
-    if ($hit -eq $null) {
-      Write-Output '{"ok":true,"sighting":null}'
-    } else {
-      Write-Output (ConvertTo-Json -Compress @{ ok = $true; sighting = $hit })
-    }
+    if ($line -eq 'state') { $scan = Read-MeetState } else { $scan = Read-MeetScan (Get-BrowserWindows) }
+    Write-Output (ConvertTo-Json -Compress -Depth 6 $scan)
   } catch {
     Write-Output (ConvertTo-Json -Compress @{ ok = $false; error = $_.Exception.Message })
   }
@@ -196,6 +217,10 @@ export class MeetUrlSensor {
   private scriptPath: string | null = null;
   private buffer = "";
   private pending: ((line: string | null) => void) | null = null;
+  /** Requests run one at a time: the helper is single-threaded and there is one `pending` slot. */
+  private chain: Promise<unknown> = Promise.resolve();
+  /** Bumped by `stop`, so a request queued before it does not start the helper again after it. */
+  private epoch = 0;
 
   /**
    * Starts the helper if it is not already running.
@@ -260,6 +285,28 @@ export class MeetUrlSensor {
    * means "no Meet on screen", and a helper that died must not be able to close a widget.
    */
   async read(): Promise<MeetSighting | null> {
+    return (await this.scan("look")).sighting;
+  }
+
+  /**
+   * One question to the helper, queued behind any other in flight.
+   *
+   * `look` is the presence poll's full enumeration. `state` is the call-state tracker's faster
+   * read of the windows Meet was last found in (meet-call-state.ts). They share the helper, so
+   * they must not share the single `pending` slot at the same moment - hence the queue.
+   */
+  scan(command: "look" | "state" = "look"): Promise<MeetScan> {
+    const epoch = this.epoch;
+    const run = () => {
+      if (epoch !== this.epoch) throw new Error("The Meet URL sensor was stopped.");
+      return this.ask(command);
+    };
+    const next = this.chain.then(run, run);
+    this.chain = next.catch(() => undefined);
+    return next;
+  }
+
+  private async ask(command: "look" | "state"): Promise<MeetScan> {
     const child = this.ensureStarted();
 
     const line = await new Promise<string | null>((resolve) => {
@@ -274,19 +321,25 @@ export class MeetUrlSensor {
         clearTimeout(timer);
         resolve(value);
       };
-      child.stdin.write("look\n");
+      child.stdin.write(`${command}\n`);
     });
 
     if (line === null) throw new Error("The Meet URL sensor did not answer.");
 
     const parsed = JSON.parse(line) as
-      | { ok: true; sighting: MeetSighting | null }
+      | { ok: true; sighting: MeetSighting | null; surfaces?: unknown }
       | { ok: false; error: string };
     if (!parsed.ok) throw new Error(parsed.error);
-    return parsed.sighting;
+    const surfaces = parseMeetSurfaces(parsed.surfaces);
+    // A surface that is in a call is a sighting even where the URL read found none: Chrome's
+    // picture-in-picture window. See sightingFromScan for what this does and does not change.
+    return { sighting: sightingFromScan(parsed.sighting ?? null, surfaces), surfaces };
   }
 
   stop(): void {
+    this.epoch++;
+    // Answered rather than dropped: an unanswered request would hold the queue for good.
+    this.pending?.(null);
     this.pending = null;
     this.buffer = "";
     this.child?.kill();
