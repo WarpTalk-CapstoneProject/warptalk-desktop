@@ -275,6 +275,14 @@ export interface MeetCaptionEvent {
   tConfidence: "live" | "batch";
   stale: boolean;
   source: "meet_caption";
+  /**
+   * `alignedNow()` in main at the moment main sent this event to the renderer (a replay from the
+   * 30 s buffer is stamped when it is replayed, not when it was read). The renderer converts the
+   * times above to its own clock with `t + (Date.now() - sentAtMs)`: main's axis is anchored to
+   * Date.now() once at load, so a wall-clock jump since then (NTP, sleep/resume) would otherwise
+   * shift every time. IPC latency (~1 ms) is the residual error. Absent from older desktops.
+   */
+  sentAtMs?: number;
 }
 
 /**
