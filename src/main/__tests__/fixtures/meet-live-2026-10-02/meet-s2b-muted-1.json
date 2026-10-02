@@ -1,0 +1,614 @@
+{
+    "type":  "Document",
+    "name":  "Meet - hqw-cmis-waa",
+    "className":  "",
+    "automationId":  "RootWebArea",
+    "children":  [
+                     {
+                         "type":  "Group",
+                         "name":  "",
+                         "className":  "EIlDfe J0p3ve",
+                         "automationId":  "",
+                         "children":  [
+                                          {
+                                              "type":  "Text",
+                                              "name":  "11:50",
+                                              "className":  "",
+                                              "automationId":  "",
+                                              "children":  [
+
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Separator",
+                                              "name":  "",
+                                              "className":  "g2yd9 ",
+                                              "automationId":  "",
+                                              "children":  [
+
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Text",
+                                              "name":  "hqw-cmis-waa",
+                                              "className":  "Qp8KI NqmFAd",
+                                              "automationId":  "",
+                                              "children":  [
+
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Button",
+                                              "name":  "Chi tiết về cuộc họp",
+                                              "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe shdMH NICsY t2FmWe wjQjmd boDUxc EXoIMe",
+                                              "automationId":  "",
+                                              "children":  [
+
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "Thông báo và thao tác đối với tính năng gọi điện",
+                                              "className":  " P9KVBf Y2Syxf Czwjqb",
+                                              "automationId":  "",
+                                              "children":  [
+                                                               {
+                                                                   "type":  "Group",
+                                                                   "name":  "",
+                                                                   "className":  "",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+                                                                                    {
+                                                                                        "type":  "Button",
+                                                                                        "name":  "Mọi người",
+                                                                                        "className":  "JgybGf",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    }
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Group",
+                                                                   "name":  "",
+                                                                   "className":  "",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+                                                                                    {
+                                                                                        "type":  "Button",
+                                                                                        "name":  "Ghi chú bằng Gemini",
+                                                                                        "className":  "JgybGf",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    }
+                                                                                ]
+                                                               }
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "",
+                                              "className":  "axUSnc cZXVke  P9KVBf",
+                                              "automationId":  "",
+                                              "children":  [
+                                                               {
+                                                                   "type":  "Group",
+                                                                   "name":  "",
+                                                                   "className":  "oZRSLe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+                                                                                    {
+                                                                                        "type":  "Button",
+                                                                                        "name":  "Căn lại khung hình",
+                                                                                        "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe N62YNe S5GDme EXoIMe",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    },
+                                                                                    {
+                                                                                        "type":  "Button",
+                                                                                        "name":  "Nền và hiệu ứng",
+                                                                                        "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe N62YNe S5GDme EXoIMe",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    },
+                                                                                    {
+                                                                                        "type":  "Button",
+                                                                                        "name":  "Tuỳ chọn khác cho Hanh Nhi Ngo Xuan",
+                                                                                        "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe N62YNe S5GDme S5GDme EXoIMe",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    },
+                                                                                    {
+                                                                                        "type":  "Text",
+                                                                                        "name":  "Hanh Nhi Ngo Xuan",
+                                                                                        "className":  "",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    }
+                                                                                ]
+                                                               }
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "Bảng điều khiển bên",
+                                              "className":  "R3Gmyc WSJBnb qdulke  P9KVBf",
+                                              "automationId":  "",
+                                              "children":  [
+
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "Bảng điều khiển bên trái",
+                                              "className":  "R3Gmyc WDqswc qdulke smBa1b  P9KVBf",
+                                              "automationId":  "",
+                                              "children":  [
+
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "Kiểm soát cuộc gọi",
+                                              "className":  "Tmb7Fd  DLFzRd",
+                                              "automationId":  "",
+                                              "children":  [
+                                                               {
+                                                                   "type":  "Text",
+                                                                   "name":  "Record this call using Fathom",
+                                                                   "className":  "",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Group",
+                                                                   "name":  "",
+                                                                   "className":  "flex items-center space-x-1 rounded-full p-2.5 leading-none font-semibold text-neutral-50 transition-colors bg-zinc-700 cursor-pointer",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+                                                                                    {
+                                                                                        "type":  "Image",
+                                                                                        "name":  "",
+                                                                                        "className":  "h-6 w-6 max-w-none ",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    }
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Group",
+                                                                   "name":  "",
+                                                                   "className":  "gPfPb",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Chế độ cài đặt âm thanh",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe L5pwxb wXNcS KPC7Be KbIBtf kTsEPd BfwJld ErEn6d EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Bật micrô",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe EXoIMe Y3DJRd GgyKtd",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Cài đặt video",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe L5pwxb Z74pie KPC7Be kTsEPd BfwJld ErEn6d EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Tắt máy ảnh",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe aLTxue MNEgVb EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Chia sẻ màn hình",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe jfzJEe aLTxue EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Gửi biểu tượng cảm xúc",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe hk9qKe aLTxue jfzJEe EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Bật phụ đề",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe aLTxue jfzJEe EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Giơ tay phát biểu (ctrl + alt + h)",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe aLTxue jfzJEe EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Tùy chọn khác",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe aLTxue f5Y13e EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Rời khỏi cuộc gọi",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe RnWvU xCYCgd EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               }
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "",
+                                              "className":  "tMdQNe Dg8mNb",
+                                              "automationId":  "",
+                                              "children":  [
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Trò chuyện với mọi người",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe Ld74n t2FmWe wjQjmd boDUxc EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Công cụ cuộc họp",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe Ld74n t2FmWe wjQjmd boDUxc EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Bộ điều khiển của người tổ chức",
+                                                                   "className":  "VYBDae-Bz112c-LgbsSe VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc hk9qKe Ld74n t2FmWe wjQjmd boDUxc EXoIMe",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               }
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Window",
+                                              "name":  "Bạn đang nói phải không? Micrô hiện đang tắt.",
+                                              "className":  "TZFSLb P9KVBf ddIcCe X2mOrf TzAhtb",
+                                              "automationId":  "",
+                                              "children":  [
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Đóng",
+                                                                   "className":  "pYTkkf-Bz112c-LgbsSe pYTkkf-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc JAUIm humMQc KNDZcf",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Text",
+                                                                   "name":  "Bạn đang nói phải không? Micrô hiện đang tắt. Hãy nhấp vào micrô để bật.",
+                                                                   "className":  "",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               }
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "",
+                                              "className":  "dark",
+                                              "automationId":  "tactiq-content-div",
+                                              "children":  [
+                                                               {
+                                                                   "type":  "Group",
+                                                                   "name":  "",
+                                                                   "className":  "min-h-[50px] cursor-pointer bg-transparent hover:bg-[#202225] active:bg-[#202225] active:shadow-inset-[0_0_10px_#000000] rounded-md box-content flex flex-col items-center justify-center",
+                                                                   "automationId":  "dndhandle",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Toggle sidebar",
+                                                                   "className":  "min-h-[50px] flex justify-center items-center cursor-pointer bg-transparent hover:bg-[#202225] active:bg-[#202225] active:shadow-inset-[0_0_10px_#000000] rounded-md box-border relative",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+                                                                                    {
+                                                                                        "type":  "Image",
+                                                                                        "name":  "Tactiq",
+                                                                                        "className":  "",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    },
+                                                                                    {
+                                                                                        "type":  "Group",
+                                                                                        "name":  "",
+                                                                                        "className":  "",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+                                                                                                         {
+                                                                                                             "type":  "Image",
+                                                                                                             "name":  "",
+                                                                                                             "className":  "",
+                                                                                                             "automationId":  "",
+                                                                                                             "children":  [
+
+                                                                                                                          ]
+                                                                                                         }
+                                                                                                     ]
+                                                                                    }
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Group",
+                                                                   "name":  "",
+                                                                   "className":  "relative flex min-h-[50px] w-full items-center justify-center",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+                                                                                    {
+                                                                                        "type":  "Button",
+                                                                                        "name":  "Ask Tactiq AI",
+                                                                                        "className":  "flex min-h-[50px] flex-grow cursor-pointer items-center justify-center",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+                                                                                                         {
+                                                                                                             "type":  "Image",
+                                                                                                             "name":  "",
+                                                                                                             "className":  "",
+                                                                                                             "automationId":  "",
+                                                                                                             "children":  [
+
+                                                                                                                          ]
+                                                                                                         }
+                                                                                                     ]
+                                                                                    }
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Highlight last block",
+                                                                   "className":  "min-h-[50px] flex justify-center items-center cursor-pointer bg-transparent hover:bg-[#202225] active:bg-[#202225] active:shadow-inset-[0_0_10px_#000000] rounded-md box-border",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+                                                                                    {
+                                                                                        "type":  "Image",
+                                                                                        "name":  "",
+                                                                                        "className":  "",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    }
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Toggle captions visibility",
+                                                                   "className":  "min-h-[50px] cursor-pointer bg-transparent hover:bg-[#202225] active:bg-[#202225] active:shadow-inset-[0_0_10px_#000000] rounded-md box-content flex flex-col items-center justify-center",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+                                                                                    {
+                                                                                        "type":  "Image",
+                                                                                        "name":  "",
+                                                                                        "className":  "",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    }
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Tiếng Việt (Vietnam)",
+                                                                   "className":  "self-stretch flex-1 flex items-center justify-center cursor-pointer",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Open Google document",
+                                                                   "className":  "min-h-[50px] cursor-pointer bg-transparent hover:bg-[#202225] active:bg-[#202225] active:shadow-inset-[0_0_10px_#000000] rounded-md box-content flex flex-col items-center justify-center",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+                                                                                    {
+                                                                                        "type":  "Image",
+                                                                                        "name":  "",
+                                                                                        "className":  "",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    }
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "Take screenshot",
+                                                                   "className":  "min-h-[50px] cursor-pointer bg-transparent hover:bg-[#202225] active:bg-[#202225] active:shadow-inset-[0_0_10px_#000000] rounded-md box-content flex flex-col items-center justify-center",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+                                                                                    {
+                                                                                        "type":  "Image",
+                                                                                        "name":  "",
+                                                                                        "className":  "MuiSvgIcon-root MuiSvgIcon-fontSizeMedium MuiBox-root css-1om0hkc",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    }
+                                                                                ]
+                                                               }
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "",
+                                              "className":  "",
+                                              "automationId":  "",
+                                              "children":  [
+                                                               {
+                                                                   "type":  "Text",
+                                                                   "name":  "Micrô của bạn đang tắt.",
+                                                                   "className":  "",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               }
+                                                           ]
+                                          }
+                                      ]
+                     },
+                     {
+                         "type":  "Group",
+                         "name":  "",
+                         "className":  "chat-gpt-quick-query-container",
+                         "automationId":  "",
+                         "children":  [
+                                          {
+                                              "type":  "Button",
+                                              "name":  "logo icon",
+                                              "className":  "float-btn relative flex-center bg-grey-layer2-normal select-none",
+                                              "automationId":  "",
+                                              "children":  [
+                                                               {
+                                                                   "type":  "Image",
+                                                                   "name":  "logo icon. Để tải nội dung mô tả hình ảnh bị thiếu, hãy mở menu ngữ cảnh.",
+                                                                   "className":  "size-5 pointer-events-none",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               },
+                                                               {
+                                                                   "type":  "Group",
+                                                                   "name":  "",
+                                                                   "className":  "relative inline-flex outline-none close-btn size-4 rounded-full text-text-white-1 bg-glass-fill1-normal backdrop-blur-md cursor-pointer hover:bg-glass-fill1-hover",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+                                                                                    {
+                                                                                        "type":  "Image",
+                                                                                        "name":  "",
+                                                                                        "className":  "",
+                                                                                        "automationId":  "",
+                                                                                        "children":  [
+
+                                                                                                     ]
+                                                                                    }
+                                                                                ]
+                                                               }
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "",
+                                              "className":  "chat-gpt-query-model-wrapper outline-none active:outline-none focus:outline-none ",
+                                              "automationId":  "",
+                                              "children":  [
+                                                               {
+                                                                   "type":  "Button",
+                                                                   "name":  "",
+                                                                   "className":  "size-10 absolute z-[-1] bottom-[10px] flex-center p-0 outline-none border-none text-title bg-bg2 cursor-pointer hover:text-primary transition-colors -left-[38px] rounded-tl-full rounded-bl-full",
+                                                                   "automationId":  "",
+                                                                   "children":  [
+
+                                                                                ]
+                                                               }
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "",
+                                              "className":  "pointer-events-auto",
+                                              "automationId":  "",
+                                              "children":  [
+
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "",
+                                              "className":  "fixed top-0 left-0",
+                                              "automationId":  "",
+                                              "children":  [
+
+                                                           ]
+                                          },
+                                          {
+                                              "type":  "Group",
+                                              "name":  "",
+                                              "className":  "sider-popup-container absolute z-max3 top-0 start-0 end-0",
+                                              "automationId":  "",
+                                              "children":  [
+
+                                                           ]
+                                          }
+                                      ]
+                     }
+                 ]
+}
