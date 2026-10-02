@@ -1,0 +1,519 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  MEET_SURFACE_SCRIPT,
+  MeetCallStateTracker,
+  buttonsFromUiaTree,
+  classifyMeetCall,
+  classifyMeetSurface,
+  parseMeetSurfaces,
+  sightingFromScan,
+} from "../meet-call-state.ts";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const load = (name) => JSON.parse(readFileSync(path.join(here, "fixtures", name), "utf8").replace(/^﻿/, ""));
+
+/**
+ * A dumped Meet tab as the surface the helper would return for it. The dumps hold the Document
+ * subtree but not its address, so the room code is taken from the document's own name
+ * ("Meet - <code>"), which is what the tab showed when it was dumped.
+ */
+function tabSurface(name, overrides = {}) {
+  const root = load(name);
+  const code = /^Meet - ([a-z-]+)$/.exec(root.name)?.[1];
+  assert.ok(code, `${name}: no room code in the document name`);
+  return { surface: "tab", meetCode: code, processId: 4242, buttons: buttonsFromUiaTree(root), ...overrides };
+}
+
+const LIVE = "meet-live-2026-10-02/";
+const pip = () => load(`${LIVE}meet-pip-handwritten.json`);
+
+/** The same buttons with every class token scrambled: what a Meet release that renames them does. */
+function renamedClasses(surface) {
+  return {
+    ...surface,
+    buttons: surface.buttons.map((b) => ({
+      n: b.n,
+      c: b.c
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((token) => (/[[\]:/#]/.test(token) ? token : `zz${[...token].reverse().join("")}`))
+        .join(" "),
+    })),
+  };
+}
+
+/** The same buttons in a language the vocabulary does not hold. */
+function unknownLanguage(surface) {
+  return { ...surface, buttons: surface.buttons.map((b, i) => ({ n: `Schaltfläche ${i}`, c: b.c })) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The four live dumps (2026-10-02, Chrome, vi UI)
+// ---------------------------------------------------------------------------------------------
+
+test("lobby: a mic button and no Leave button is the green room, not the call", () => {
+  const { call, mic } = classifyMeetCall([tabSurface(`${LIVE}meet-s1-lobby-1.json`)]);
+  assert.deepEqual(call, { phase: "lobby", via: "tab", meetCode: "hqw-cmis-waa", reason: "mic-button-no-leave" });
+  assert.deepEqual(mic, { muted: false, stale: false, via: "class" });
+});
+
+test("in call, mic on: the Leave button's class says in-call, the mic's class says unmuted", () => {
+  const { call, mic } = classifyMeetCall([tabSurface(`${LIVE}meet-s2a-incall-1.json`)]);
+  assert.deepEqual(call, { phase: "in-call", via: "tab", meetCode: "hqw-cmis-waa", reason: "leave-button-class" });
+  assert.deepEqual(mic, { muted: false, stale: false, via: "class" });
+});
+
+test("in call, mic muted: the camera is still ON in this dump and must not be read as the mic", () => {
+  const surface = tabSurface(`${LIVE}meet-s2b-muted-1.json`);
+  // The trap: the camera carries the same "on" token the mic would.
+  const camera = surface.buttons.find((b) => b.n === "Tắt máy ảnh");
+  assert.match(camera.c, /\baLTxue\b/);
+  const { call, mic } = classifyMeetCall([surface]);
+  assert.equal(call.phase, "in-call");
+  assert.deepEqual(mic, { muted: true, stale: false, via: "class" });
+});
+
+test("left: the address is still the meeting's, and it is not a call", () => {
+  const { call, mic } = classifyMeetCall([tabSurface(`${LIVE}meet-s4-left-1.json`)]);
+  assert.deepEqual(call, { phase: "left", via: "tab", meetCode: "csk-fzok-ssx", reason: "rejoin-button" });
+  assert.deepEqual(mic, { muted: null, stale: false, via: null });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Picture-in-picture (hand-written surface; see the fixture's own comment)
+// ---------------------------------------------------------------------------------------------
+
+test("the picture-in-picture window is the call, with its room code", () => {
+  const { call, mic } = classifyMeetCall(parseMeetSurfaces([pip().micOn]));
+  assert.deepEqual(call, { phase: "in-call", via: "pip", meetCode: "hqw-cmis-waa", reason: "leave-button-class" });
+  assert.deepEqual(mic, { muted: false, stale: false, via: "class" });
+});
+
+test("muting inside the picture-in-picture window is read like the tab", () => {
+  const { call, mic } = classifyMeetCall(parseMeetSurfaces([pip().micMuted]));
+  assert.equal(call.phase, "in-call");
+  assert.deepEqual(mic, { muted: true, stale: false, via: "class" });
+});
+
+test("a window that only has the PiP title is not Meet", () => {
+  // The title is written by a page. Without a call control inside, it proves nothing.
+  const bare = { surface: "pip", meetCode: "abc-defg-hij", processId: 1, buttons: [{ n: "OK", c: "btn" }] };
+  assert.equal(classifyMeetCall([bare]).call.phase, "unknown");
+  assert.equal(sightingFromScan(null, [bare]), null);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The older dumps must not regress
+// ---------------------------------------------------------------------------------------------
+
+for (const name of ["meet-tree-vi-captions-on.json", "meet-tree-vi-captions-multi.json"]) {
+  test(`older dump ${name}: in call, mic on`, () => {
+    const { call, mic } = classifyMeetCall([tabSurface(name)]);
+    assert.deepEqual(call, { phase: "in-call", via: "tab", meetCode: "ffo-iwfp-dgw", reason: "leave-button-class" });
+    // CC is ON in these dumps and its button carries neither toggle token; it must not disturb
+    // the mic read.
+    assert.deepEqual(mic, { muted: false, stale: false, via: "class" });
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// The fallback tier, and degrading instead of guessing
+// ---------------------------------------------------------------------------------------------
+
+test("Meet renames its classes: the names still give the phase and the mute", () => {
+  const incall = classifyMeetCall([renamedClasses(tabSurface(`${LIVE}meet-s2a-incall-1.json`))]);
+  assert.equal(incall.call.phase, "in-call");
+  assert.equal(incall.call.reason, "leave-button-name");
+  assert.deepEqual(incall.mic, { muted: false, stale: false, via: "name" });
+
+  const muted = classifyMeetCall([renamedClasses(tabSurface(`${LIVE}meet-s2b-muted-1.json`))]);
+  assert.deepEqual(muted.mic, { muted: true, stale: false, via: "name" });
+
+  const lobby = classifyMeetCall([renamedClasses(tabSurface(`${LIVE}meet-s1-lobby-1.json`))]);
+  assert.equal(lobby.call.phase, "lobby");
+
+  const left = classifyMeetCall([renamedClasses(tabSurface(`${LIVE}meet-s4-left-1.json`))]);
+  assert.equal(left.call.phase, "left");
+});
+
+test("an unknown language: the classes still give the phase and the mute", () => {
+  const incall = classifyMeetCall([unknownLanguage(tabSurface(`${LIVE}meet-s2a-incall-1.json`))]);
+  assert.equal(incall.call.reason, "leave-button-class");
+  assert.deepEqual(incall.mic, { muted: false, stale: false, via: "class" });
+
+  const muted = classifyMeetCall([unknownLanguage(tabSurface(`${LIVE}meet-s2b-muted-1.json`))]);
+  assert.deepEqual(muted.mic, { muted: true, stale: false, via: "class" });
+
+  const lobby = classifyMeetCall([unknownLanguage(tabSurface(`${LIVE}meet-s1-lobby-1.json`))]);
+  assert.equal(lobby.call.phase, "lobby");
+
+  // No Rejoin label to recognise: the missing toolbar is what says "left".
+  const left = classifyMeetCall([unknownLanguage(tabSurface(`${LIVE}meet-s4-left-1.json`))]);
+  assert.deepEqual(left.call, { phase: "left", via: "tab", meetCode: "csk-fzok-ssx", reason: "no-call-controls" });
+});
+
+test("renamed classes AND an unknown language: unknown, never 'left'", () => {
+  // The case that must not end a meeting: the toolbar is there, and nothing here can read it.
+  for (const name of ["meet-s2a-incall-1.json", "meet-s2b-muted-1.json", "meet-s1-lobby-1.json"]) {
+    const { call, mic } = classifyMeetCall([unknownLanguage(renamedClasses(tabSurface(LIVE + name)))]);
+    assert.deepEqual(
+      { phase: call.phase, reason: call.reason },
+      { phase: "unknown", reason: "controls-unrecognised" },
+      name,
+    );
+    assert.equal(mic.muted, null, name);
+  }
+});
+
+test("a mic button whose name and class contradict each other is not decided", () => {
+  const surface = tabSurface(`${LIVE}meet-s2a-incall-1.json`);
+  const buttons = surface.buttons.map((b) => (b.n === "Tắt micrô" ? { n: "Bật micrô", c: b.c } : b));
+  const { call, mic } = classifyMeetCall([{ ...surface, buttons }]);
+  assert.equal(call.phase, "in-call");
+  assert.deepEqual(mic, { muted: null, stale: false, via: null });
+});
+
+test("without a known mic name, a first toggle that is the camera is not taken for the mic", () => {
+  const surface = tabSurface(`${LIVE}meet-s2a-incall-1.json`);
+  const buttons = surface.buttons.filter((b) => b.n !== "Tắt micrô");
+  const { call, mic } = classifyMeetCall([{ ...surface, buttons }]);
+  assert.equal(call.phase, "in-call");
+  assert.equal(mic.muted, null);
+});
+
+test("a button an extension injected cannot pose as Meet's mic or Leave button", () => {
+  const left = tabSurface(`${LIVE}meet-s4-left-1.json`);
+  const posing = [
+    { n: "Rời khỏi cuộc gọi", c: "min-h-[50px] RnWvU flex" },
+    { n: "Tắt micrô", c: "hover:bg-[#202225] aLTxue" },
+  ];
+  const { call } = classifyMeetCall([{ ...left, buttons: [...left.buttons, ...posing] }]);
+  assert.equal(call.phase, "left");
+});
+
+test("a tab whose tree has not been read yet is unknown, not left", () => {
+  const empty = { surface: "tab", meetCode: "abc-defg-hij", processId: 1, buttons: [] };
+  assert.deepEqual(classifyMeetSurface(empty).call.reason, "empty-tree");
+  assert.equal(classifyMeetSurface(empty).call.phase, "unknown");
+});
+
+test("a listing cut short is unknown when the controls were not in the part that arrived", () => {
+  const left = tabSurface(`${LIVE}meet-s4-left-1.json`, { truncated: true });
+  assert.equal(classifyMeetCall([left]).call.reason, "listing-truncated");
+  // Controls that did arrive are still believed.
+  const incall = tabSurface(`${LIVE}meet-s2a-incall-1.json`, { truncated: true });
+  assert.equal(classifyMeetCall([incall]).call.phase, "in-call");
+});
+
+test("no Meet surface at all is unknown: a background tab is invisible, not gone", () => {
+  assert.deepEqual(classifyMeetCall([]).call, {
+    phase: "unknown",
+    via: null,
+    meetCode: null,
+    reason: "no-meet-surface",
+  });
+});
+
+test("a minimized window is read but its mic value is flagged stale", () => {
+  const { mic } = classifyMeetCall([tabSurface(`${LIVE}meet-s2b-muted-1.json`, { minimized: true })]);
+  assert.deepEqual(mic, { muted: true, stale: true, via: "class" });
+});
+
+test("the call wins over a 'you left' tab of another meeting", () => {
+  const left = tabSurface(`${LIVE}meet-s4-left-1.json`);
+  const [inPip] = parseMeetSurfaces([pip().micMuted]);
+  const { call, mic } = classifyMeetCall([left, inPip]);
+  assert.deepEqual({ phase: call.phase, via: call.via, meetCode: call.meetCode }, {
+    phase: "in-call",
+    via: "pip",
+    meetCode: "hqw-cmis-waa",
+  });
+  assert.equal(mic.muted, true);
+});
+
+// ---------------------------------------------------------------------------------------------
+// What presence is told
+// ---------------------------------------------------------------------------------------------
+
+test("presence: the PiP window is a sighting with the room code, though its document is about:blank", () => {
+  const surfaces = parseMeetSurfaces([pip().micOn]);
+  // The URL read found nothing: about:blank, and no origin label on this Chrome.
+  assert.deepEqual(sightingFromScan(null, surfaces), { meetCode: "hqw-cmis-waa", processId: 4242, via: "pip" });
+  // Nor does it lose the code when the URL read did find the origin label (which carries none).
+  assert.deepEqual(sightingFromScan({ meetCode: null, processId: 4242, via: "pip" }, surfaces), {
+    meetCode: "hqw-cmis-waa",
+    processId: 4242,
+    via: "pip",
+  });
+});
+
+test("presence: a 'you left' page stays a sighting - the phase travels beside it, not instead", () => {
+  const sighting = { meetCode: "csk-fzok-ssx", processId: 4242, via: "document" };
+  assert.deepEqual(sightingFromScan(sighting, [tabSurface(`${LIVE}meet-s4-left-1.json`)]), sighting);
+});
+
+test("presence: the in-call surface's window handle replaces the URL read's (WT-910 recording)", () => {
+  // The URL read preferred the normal window; the call itself is in the PiP window.
+  const [inPip] = parseMeetSurfaces([{ ...pip().micOn, windowHandle: 3333 }]);
+  assert.equal(inPip.windowHandle, 3333);
+  assert.deepEqual(sightingFromScan({ meetCode: null, processId: 4242, windowHandle: 2222, via: "document" }, [inPip]), {
+    meetCode: "hqw-cmis-waa",
+    processId: 4242,
+    windowHandle: 3333,
+    via: "pip",
+  });
+  // A malformed handle is dropped, not trusted.
+  for (const windowHandle of [0, -1, 1.5, "3333", null]) {
+    const [surface] = parseMeetSurfaces([{ ...pip().micOn, windowHandle }]);
+    assert.equal("windowHandle" in surface, false);
+  }
+});
+
+test("presence: the helper reports each surface's window handle", () => {
+  assert.match(MEET_SURFACE_SCRIPT, /windowHandle = \$w\.H\.ToInt64\(\)/);
+});
+
+test("presence: nothing seen stays nothing seen", () => {
+  assert.equal(sightingFromScan(null, []), null);
+});
+
+test("helper output is parsed defensively", () => {
+  // ConvertTo-Json collapses one-element arrays; a bad code or surface kind is dropped.
+  const one = parseMeetSurfaces({ surface: "tab", meetCode: "abc-defg-hij", processId: 7, buttons: { n: "x", c: "y" } });
+  assert.deepEqual(one, [
+    { surface: "tab", meetCode: "abc-defg-hij", processId: 7, minimized: false, truncated: false, buttons: [{ n: "x", c: "y" }] },
+  ]);
+  assert.deepEqual(parseMeetSurfaces(null), []);
+  assert.deepEqual(parseMeetSurfaces([{ surface: "tab", meetCode: "../etc", buttons: [] }]), []);
+  assert.deepEqual(parseMeetSurfaces([{ surface: "window", meetCode: "abc-defg-hij", buttons: [] }]), []);
+  assert.equal(parseMeetSurfaces([{ surface: "pip", meetCode: "abc-defg-hij", processId: -1 }])[0].processId, null);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The tracker
+// ---------------------------------------------------------------------------------------------
+
+function tracker(overrides = {}) {
+  const clock = { ms: 10_000 };
+  const calls = [];
+  const mics = [];
+  const instance = new MeetCallStateTracker({
+    probe: async () => [],
+    emitCallState: (state) => calls.push(state),
+    emitSelfMic: (mic) => mics.push(mic),
+    now: () => clock.ms,
+    setTimer: () => "timer",
+    clearTimer: () => undefined,
+    ...overrides,
+  });
+  return { instance, clock, calls, mics };
+}
+
+const incallOn = () => [tabSurface(`${LIVE}meet-s2a-incall-1.json`)];
+const incallMuted = () => [tabSurface(`${LIVE}meet-s2b-muted-1.json`)];
+const leftPage = () => [tabSurface(`${LIVE}meet-s4-left-1.json`, { meetCode: "hqw-cmis-waa" })];
+
+test("tracker: joining is reported on the first read, and only once", () => {
+  const { instance, calls, mics } = tracker();
+  assert.equal(instance.callState.phase, "unknown");
+  assert.equal(instance.callState.reason, "not-watching");
+
+  instance.ingest(incallOn());
+  instance.ingest(incallOn());
+  instance.ingest(incallOn());
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], { phase: "in-call", via: "tab", meetCode: "hqw-cmis-waa", reason: "leave-button-class", atMs: 10_000 });
+  assert.equal(mics.length, 1);
+  assert.deepEqual(mics[0], { muted: false, stale: false, via: "class", meetCode: "hqw-cmis-waa", atMs: 10_000 });
+  assert.deepEqual(instance.callState, calls[0]);
+  assert.deepEqual(instance.selfMic, mics[0]);
+});
+
+test("tracker: a mute is reported on the very next read", () => {
+  const { instance, clock, calls, mics } = tracker();
+  instance.ingest(incallOn());
+  clock.ms += 1000;
+  instance.ingest(incallMuted());
+  assert.equal(calls.length, 1, "the phase did not change");
+  assert.deepEqual(mics.at(-1), { muted: true, stale: false, via: "class", meetCode: "hqw-cmis-waa", atMs: 11_000 });
+  clock.ms += 1000;
+  instance.ingest(incallOn());
+  assert.equal(mics.at(-1).muted, false);
+  assert.equal(mics.length, 3);
+});
+
+test("tracker: one 'left' read does not end the call - a re-render must not flap it", () => {
+  const { instance, clock, calls } = tracker();
+  instance.ingest(incallOn());
+  clock.ms += 1000;
+  instance.ingest(leftPage());
+  assert.equal(instance.callState.phase, "in-call");
+  clock.ms += 1000;
+  instance.ingest(incallOn());
+  clock.ms += 1000;
+  instance.ingest(leftPage());
+  assert.equal(instance.callState.phase, "in-call", "the streak was broken by the read in between");
+  assert.equal(calls.length, 1);
+});
+
+test("tracker: 'left' needs two reads AND time between them", () => {
+  const { instance, clock, calls, mics } = tracker();
+  instance.ingest(incallMuted());
+  clock.ms += 1000;
+  // The presence look and the fast read can land together: two reads, no time.
+  instance.ingest(leftPage());
+  clock.ms += 20;
+  instance.ingest(leftPage());
+  assert.equal(instance.callState.phase, "in-call");
+  clock.ms += 1480;
+  instance.ingest(leftPage());
+  assert.equal(instance.callState.phase, "left");
+  assert.equal(calls.at(-1).reason, "rejoin-button");
+  // The call is over: no mic value survives it.
+  assert.deepEqual(mics.at(-1), { muted: null, stale: false, via: null, meetCode: "hqw-cmis-waa", atMs: clock.ms });
+});
+
+test("tracker: Meet out of sight keeps the last mic value and marks it stale", () => {
+  const { instance, clock, calls, mics } = tracker();
+  instance.ingest(incallMuted());
+  clock.ms += 1000;
+  instance.ingest([]);
+  assert.equal(instance.callState.phase, "in-call", "one empty read is the tab-switch gap");
+  assert.equal(instance.selfMic.stale, false);
+  clock.ms += 2000;
+  instance.ingest([]);
+  assert.deepEqual(calls.at(-1), { phase: "unknown", via: null, meetCode: null, reason: "no-meet-surface", atMs: clock.ms });
+  assert.deepEqual(mics.at(-1), { muted: true, stale: true, via: "class", meetCode: "hqw-cmis-waa", atMs: clock.ms });
+
+  // Back in sight, in the PiP window, still muted: fresh again.
+  clock.ms += 1000;
+  instance.ingest(parseMeetSurfaces([pip().micMuted]));
+  assert.equal(calls.at(-1).via, "pip");
+  assert.deepEqual(mics.at(-1), { muted: true, stale: false, via: "class", meetCode: "hqw-cmis-waa", atMs: clock.ms });
+});
+
+test("tracker: tab to picture-in-picture is one change of 'via', with no gap reported", () => {
+  const { instance, clock, calls } = tracker();
+  instance.ingest(incallOn());
+  clock.ms += 1000;
+  instance.ingest([]); // the moment between the tab hiding and Chrome raising the PiP window
+  clock.ms += 1000;
+  instance.ingest(parseMeetSurfaces([pip().micOn]));
+  assert.deepEqual(calls.map((c) => `${c.phase}/${c.via}`), ["in-call/tab", "in-call/pip"]);
+});
+
+test("tracker: a stale mic value is not carried into another meeting", () => {
+  const { instance, clock, mics } = tracker();
+  instance.ingest(incallMuted());
+  clock.ms += 1000;
+  // Another meeting's page, in a state with no readable mic.
+  const other = { surface: "tab", meetCode: "abc-defg-hij", processId: 1, buttons: [] };
+  instance.ingest([other]);
+  clock.ms += 2000;
+  instance.ingest([other]);
+  assert.deepEqual(mics.at(-1), { muted: null, stale: false, via: null, meetCode: "abc-defg-hij", atMs: clock.ms });
+});
+
+test("tracker: failed reads need confirming too, and never read as 'left'", () => {
+  const { instance, clock } = tracker();
+  instance.ingest(incallOn());
+  clock.ms += 1000;
+  instance.ingestFailure();
+  assert.equal(instance.callState.phase, "in-call");
+  clock.ms += 2000;
+  instance.ingestFailure();
+  assert.equal(instance.callState.phase, "unknown");
+  assert.equal(instance.callState.reason, "probe-failed");
+  assert.deepEqual({ muted: instance.selfMic.muted, stale: instance.selfMic.stale }, { muted: false, stale: true });
+});
+
+test("tracker: reset says 'not watching' at once and stops the fast loop", async () => {
+  let probes = 0;
+  const timers = [];
+  const { instance, calls } = tracker({
+    probe: async () => {
+      probes += 1;
+      return incallOn();
+    },
+    setTimer: (callback) => {
+      timers.push(callback);
+      return timers.length;
+    },
+  });
+  instance.setPolling(true);
+  instance.setPolling(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(probes, 1, "arming twice starts one loop");
+  assert.equal(instance.callState.phase, "in-call");
+  assert.equal(timers.length, 1);
+
+  instance.reset();
+  assert.equal(instance.isPolling, false);
+  assert.deepEqual(
+    { phase: calls.at(-1).phase, reason: calls.at(-1).reason },
+    { phase: "unknown", reason: "not-watching" },
+  );
+  // The timer that was pending belongs to a loop nobody runs any more.
+  timers[0]();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(probes, 1);
+});
+
+test("tracker: a probe that rejects is a failed read, and the loop goes on", async () => {
+  const timers = [];
+  const { instance } = tracker({
+    probe: async () => {
+      throw new Error("helper died");
+    },
+    setTimer: (callback) => {
+      timers.push(callback);
+      return timers.length;
+    },
+  });
+  instance.setPolling(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(timers.length, 1);
+  assert.equal(instance.callState.reason, "probe-failed");
+  instance.reset();
+});
+
+test("tracker: without a sensor (macOS, Linux) it says so and never polls", () => {
+  const { instance, calls } = tracker({ probe: null });
+  assert.equal(instance.callState.reason, "unsupported-platform");
+  instance.setPolling(true);
+  assert.equal(instance.isPolling, false);
+  instance.reset();
+  assert.equal(calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The helper script fragment
+// ---------------------------------------------------------------------------------------------
+
+test("the surface script is pure ASCII and has no backtick", () => {
+  // PowerShell 5.1 reads a BOM-less script as ANSI; a backtick would end the template literal.
+  assert.doesNotMatch(MEET_SURFACE_SCRIPT, /[^\x00-\x7f]/);
+  assert.doesNotMatch(MEET_SURFACE_SCRIPT, /`/);
+});
+
+test("the PiP title is matched whole and case-sensitively, and only over about:blank", () => {
+  const body = MEET_SURFACE_SCRIPT.slice(MEET_SURFACE_SCRIPT.indexOf("function Get-MeetSurface"));
+  assert.match(MEET_SURFACE_SCRIPT, /\$PIP_TITLE = '\^Meet - \(\[a-z\]\{3,4\}-\[a-z\]\{3,4\}-\[a-z\]\{3,4\}\)\$'/);
+  const blank = body.indexOf("$value -eq 'about:blank'");
+  const title = body.indexOf("-cmatch $PIP_TITLE");
+  assert.notEqual(blank, -1, "the about:blank gate is gone");
+  assert.notEqual(title, -1, "the title is no longer matched case-sensitively");
+  assert.ok(blank < title, "the about:blank gate must come before the title is believed");
+  // A tab surface needs the exact host, never a substring.
+  assert.match(body, /\$uri\.Host -ne 'meet\.google\.com'/);
+});
+
+test("the helper lists buttons and nothing else: no invoke, no focus, no keys", () => {
+  assert.doesNotMatch(MEET_SURFACE_SCRIPT, /InvokePattern|SetFocus|SendKeys|SendWait|TogglePattern/);
+});

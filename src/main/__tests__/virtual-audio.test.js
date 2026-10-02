@@ -7,6 +7,7 @@ import {
   describeMacVirtualAudio,
   describeWindowsVirtualAudioForEndpoints,
   toAppleScriptAdminCommand,
+  withHiFiCableFormat,
 } from "../virtual-audio.ts";
 
 const SUPPORTED_BUILD = 22631;
@@ -397,4 +398,87 @@ test("bridge modes on a Mac: no text-only, voice once both devices are in", () =
     voice: { possible: true, cableInstalled: true, inbound: "virtual-device" },
   });
   assert.equal(describeMacVirtualAudio([]).bridgeModes?.voice.reason, "cable-missing");
+});
+
+// Endpoint labels: the renderer reads these instead of keeping its own device-name tables.
+
+const WINDOWS_LABELS = {
+  outboundProviderId: "vbcable-free",
+  outboundSink: "CABLE Input (VB-Audio Virtual Cable)",
+  meetMicrophone: "CABLE Output (VB-Audio Virtual Cable)",
+  inboundProviderId: "hifi-cable-free",
+  inboundCapture: "Hi-Fi Cable Output",
+  meetSpeaker: "Hi-Fi Cable Input",
+  inboundOptional: true,
+};
+
+test("endpoint labels: Windows always names VB-CABLE out and Hi-Fi Cable back, whatever is installed", () => {
+  for (const endpoints of [[], [CABLE_OUTPUT], [CABLE_OUTPUT, HIFI_OUTPUT], [HIFI_OUTPUT]]) {
+    for (const build of [SUPPORTED_BUILD, UNSUPPORTED_BUILD]) {
+      assert.deepEqual(
+        describeWindowsVirtualAudioForEndpoints(endpoints, build, true).endpointLabels,
+        WINDOWS_LABELS,
+        `${JSON.stringify(endpoints)} on ${build}`,
+      );
+    }
+  }
+});
+
+test("endpoint labels: Voicemeeter is reported as a device but never becomes the route", () => {
+  const status = describeWindowsVirtualAudioForEndpoints(
+    ["VoiceMeeter Aux Output (VB-Audio VoiceMeeter AUX VAIO)", "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)"],
+    UNSUPPORTED_BUILD,
+  );
+  assert.equal(status.bridgeMode, "installed-not-running");
+  assert.deepEqual(status.endpointLabels, WINDOWS_LABELS);
+});
+
+test("endpoint labels: the Windows labels agree with the detection table and are substring-safe", () => {
+  const status = describeWindowsVirtualAudioForEndpoints([CABLE_OUTPUT, HIFI_OUTPUT], SUPPORTED_BUILD, true);
+  const labels = status.endpointLabels;
+  assert.ok(labels);
+  // Meet's microphone is the outbound device detection keys on; the inbound capture is Hi-Fi's.
+  assert.equal(labels.meetMicrophone, status.devices.find((device) => device.leg === "outbound")?.deviceName);
+  assert.ok(
+    status.devices.find((device) => device.leg === "inbound")?.deviceName.startsWith(labels.inboundCapture ?? "?"),
+  );
+  // Matched as a substring by the renderer: no label may sit inside another endpoint's full name.
+  const fullNames = [
+    "CABLE Input (VB-Audio Virtual Cable)",
+    "CABLE Output (VB-Audio Virtual Cable)",
+    "Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)",
+    "Hi-Fi Cable Output (VB-Audio Hi-Fi Cable)",
+  ];
+  for (const label of [labels.outboundSink, labels.meetMicrophone, labels.inboundCapture, labels.meetSpeaker]) {
+    const hits = fullNames.filter((name) => name.toLowerCase().includes(String(label).toLowerCase()));
+    assert.equal(hits.length, 1, `${label} matches ${JSON.stringify(hits)}`);
+  }
+});
+
+test("endpoint labels: a Mac names the pair it actually chose, duplex on both legs", () => {
+  assert.deepEqual(describeMacVirtualAudio(["WarpTalkMicrophone.driver", "WarpTalkSpeaker.driver"]).endpointLabels, {
+    outboundProviderId: "warptalk-audio",
+    outboundSink: "WarpTalk Microphone",
+    meetMicrophone: "WarpTalk Microphone",
+    inboundProviderId: "warptalk-audio",
+    inboundCapture: "WarpTalk Speaker",
+    meetSpeaker: "WarpTalk Speaker",
+    inboundOptional: false,
+  });
+  const blackHole = describeMacVirtualAudio(["BlackHole2ch.driver", "BlackHole16ch.driver"]).endpointLabels;
+  assert.equal(blackHole?.outboundProviderId, "blackhole");
+  assert.equal(blackHole?.outboundSink, "BlackHole 2ch");
+  assert.equal(blackHole?.inboundCapture, "BlackHole 16ch");
+  // Nothing installed: the pair the installer offers.
+  assert.equal(describeMacVirtualAudio([]).endpointLabels?.outboundSink, "WarpTalk Microphone");
+});
+
+test("endpoint labels survive the Hi-Fi format read", async () => {
+  const status = describeWindowsVirtualAudioForEndpoints([CABLE_OUTPUT, HIFI_OUTPUT], SUPPORTED_BUILD, true);
+  const withFormats = await withHiFiCableFormat(status, async () => ({
+    input: { sampleRate: 48000, bitsPerSample: 24, channels: 2 },
+    output: { sampleRate: 48000, bitsPerSample: 24, channels: 2 },
+  }));
+  assert.deepEqual(withFormats.endpointLabels, WINDOWS_LABELS);
+  assert.equal(withFormats.hifiFormatMismatch, false);
 });

@@ -82,6 +82,47 @@ export interface VirtualAudioStatus {
    * status without it (an older desktop build) means "only voice mode exists".
    */
   bridgeModes?: BridgeModeAvailability;
+  /**
+   * The endpoint labels the renderer looks up in `enumerateDevices` to find each leg's device id,
+   * and the names it shows the user. Additive and optional: a renderer that predates it keeps its
+   * own copy of these names, and a status without it (an older desktop build) means "derive them".
+   * Absent where the platform has no detection (`supported: false`).
+   */
+  endpointLabels?: BridgeEndpointLabels;
+}
+
+/**
+ * Which endpoint each leg uses, for the provider pair this machine is on.
+ *
+ * A cable is two endpoints with opposite names, and the renderer needs both: it plays the dub INTO
+ * one (`setSinkId`, an `audiooutput`) and the user picks the OTHER in Meet (an `audioinput`). On
+ * macOS one duplex device carries both names, so the pair holds the same string twice.
+ *
+ * MATCHING: a label is matched case-insensitively as a SUBSTRING of a device label, which is how
+ * the renderer has always matched. Every label here is chosen to be substring-safe against the
+ * others: VB-CABLE's are full names because "CABLE Input" alone is inside "Hi-Fi Cable Input", and
+ * Hi-Fi Cable's are stems because the "(VB-Audio …)" suffix it reports on Windows 10/11 is not yet
+ * confirmed on a real machine (see WINDOWS_PROVIDERS).
+ */
+export interface BridgeEndpointLabels {
+  /** The provider carrying the dub out (`vbcable-free`, `warptalk-audio`, `blackhole`). */
+  outboundProviderId: string;
+  /** Render endpoint WarpTalk plays the dub into. An `audiooutput`. */
+  outboundSink: string;
+  /** Capture endpoint the user selects as Meet's microphone. An `audioinput`. */
+  meetMicrophone: string;
+  /** The provider carrying the far side back (`hifi-cable-free`, …). */
+  inboundProviderId: string | null;
+  /** Capture endpoint WarpTalk records the far side from. An `audioinput`. */
+  inboundCapture: string | null;
+  /** Render endpoint Meet's speaker is pointed at when the far side comes back on the device. */
+  meetSpeaker: string | null;
+  /**
+   * The bridge still runs without the inbound device. True on Windows, where process loopback (or,
+   * on an old build, the outbound-only rung) takes over; false on macOS, where the second device is
+   * the only way back.
+   */
+  inboundOptional: boolean;
 }
 
 /**
@@ -124,6 +165,14 @@ interface MacDeviceSet {
   devices: ReadonlyArray<
     Omit<VirtualAudioDevice, "installed" | "providerId" | "providerName" | "providerRole">
   >;
+}
+
+/** One device's two endpoint labels as the renderer matches them. See BridgeEndpointLabels. */
+interface EndpointPair {
+  /** What something plays INTO. */
+  render: string;
+  /** What something records FROM. */
+  capture: string;
 }
 
 /**
@@ -345,6 +394,50 @@ const WINDOWS_PROVIDERS: ReadonlyArray<VirtualAudioProvider> = [
   },
 ];
 
+/**
+ * The two free Windows cables' endpoints, as the renderer matches them.
+ *
+ * Always these two, whatever else is installed: they are the only Windows route the renderer
+ * plays through. Voicemeeter is reported in `devices` for support, but its endpoints only carry
+ * sound while its mixer runs ("installed-not-running"), and the renderer has never routed into it.
+ */
+const VBCABLE_ENDPOINTS: EndpointPair = {
+  render: "CABLE Input (VB-Audio Virtual Cable)",
+  capture: "CABLE Output (VB-Audio Virtual Cable)",
+};
+/** Stems on purpose: the suffix is unconfirmed, and neither stem is inside a VB-CABLE name. */
+const HIFI_CABLE_ENDPOINTS: EndpointPair = {
+  render: "Hi-Fi Cable Input",
+  capture: "Hi-Fi Cable Output",
+};
+
+export function windowsEndpointLabels(): BridgeEndpointLabels {
+  return {
+    outboundProviderId: "vbcable-free",
+    outboundSink: VBCABLE_ENDPOINTS.render,
+    meetMicrophone: VBCABLE_ENDPOINTS.capture,
+    inboundProviderId: WINDOWS_INBOUND_CABLE_ID,
+    inboundCapture: HIFI_CABLE_ENDPOINTS.capture,
+    meetSpeaker: HIFI_CABLE_ENDPOINTS.render,
+    inboundOptional: true,
+  };
+}
+
+/** A Mac pair is two duplex devices: each one's single name is both of its endpoints. */
+function macEndpointLabels(set: MacDeviceSet): BridgeEndpointLabels {
+  const outbound = set.devices.find((device) => device.leg === "outbound")!;
+  const inbound = set.devices.find((device) => device.leg === "inbound") ?? null;
+  return {
+    outboundProviderId: set.providerId,
+    outboundSink: outbound.deviceName,
+    meetMicrophone: outbound.deviceName,
+    inboundProviderId: inbound ? set.providerId : null,
+    inboundCapture: inbound?.deviceName ?? null,
+    meetSpeaker: inbound?.deviceName ?? null,
+    inboundOptional: false,
+  };
+}
+
 function withProvider(
   provider: VirtualAudioProvider,
   device: Omit<VirtualAudioDevice, "installed" | "providerId" | "providerName" | "providerRole">,
@@ -532,6 +625,7 @@ export function describeWindowsVirtualAudioForEndpoints(
     },
     riskControls: [...WINDOWS_FREE_CABLE_LOOPBACK_RISK_CONTROLS],
     bridgeModes,
+    endpointLabels: windowsEndpointLabels(),
     foreignDrivers: Array.from(endpointNames).filter(
       (name) =>
         !WINDOWS_PROVIDERS.some(
@@ -649,7 +743,7 @@ export function describeMacVirtualAudio(presentBundles: readonly string[]): Virt
       providerName: set.providerName,
       providerRole: index === 0 ? "primary" : "backup",
     }));
-    return { devices, installedCount: devices.filter((device) => device.installed).length };
+    return { set, devices, installedCount: devices.filter((device) => device.installed).length };
   });
   const chosen = candidates.reduce((best, next) =>
     next.installedCount > best.installedCount ? next : best,
@@ -685,6 +779,8 @@ export function describeMacVirtualAudio(presentBundles: readonly string[]): Virt
           },
     },
     foreignDrivers: presentBundles.filter((bundle) => !isOurs(bundle)),
+    // The pair chosen above, so the renderer's routing follows the same choice as `devices`.
+    endpointLabels: macEndpointLabels(chosen.set),
   };
 }
 

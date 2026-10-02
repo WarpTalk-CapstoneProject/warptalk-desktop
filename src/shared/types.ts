@@ -10,6 +10,10 @@ export interface WarpTalkAPI {
   listWindowsLoopbackSources: () => Promise<WindowsLoopbackSource[]>;
   startAudioCapture: (request?: WindowsLoopbackCaptureRequest) => Promise<WindowsLoopbackStartResult>;
   stopAudioCapture: () => Promise<void>;
+  /** What main is capturing right now. Absent on builds that predate it. */
+  getCaptureState?: () => Promise<AudioCaptureState>;
+  /** Main stopped a capture by itself (one started with `stopWhenMeetGone`). Main window only. */
+  onAudioCaptureStopped?: (callback: (event: AudioCaptureStopped) => void) => () => void;
   onWindowsLoopbackPcmChunk: (callback: (chunk: WindowsLoopbackPcmChunk) => void) => () => void;
   joinTranslationRoom: (translationRoomId: string) => Promise<void>;
   leaveTranslationRoom: () => Promise<void>;
@@ -70,6 +74,26 @@ export interface WarpTalkAPI {
    */
   setMeetMicStream?: (enabled: boolean, options?: { browserPid?: number }) => Promise<void>;
   onMeetMicState?: (callback: (state: MeetMicState) => void) => () => void;
+  /**
+   * Recording a bridge meeting with Google Meet's own UI in the picture (WT-910, Windows only).
+   * Arms a one-shot: the NEXT `navigator.mediaDevices.getDisplayMedia()` from the main window
+   * within 10 s is answered with the sighted Meet window - video only, no audio, no picker. Call
+   * it, then call getDisplayMedia straight away. Main window only; requires the loopback capture
+   * (started with consent) to be running. Absent on desktop builds that predate it.
+   */
+  armMeetWindowCapture?: (roomId: string) => Promise<ArmMeetWindowCaptureResult>;
+  /**
+   * Whether the user is in the Google Meet call (not merely on its page), and whether Meet's own
+   * microphone button is muted - read from Meet's buttons through UI Automation, in the tab or in
+   * Chrome's picture-in-picture window (Windows only). No stream to switch on: both ride on the
+   * presence watch (`watchMeetPresence`) and are silent while it is disarmed. Events arrive only
+   * on a change; the getters give the current value to a subscriber that came late. All optional:
+   * absent on desktop builds that predate them.
+   */
+  onMeetCallState?: (callback: (state: MeetCallState) => void) => () => void;
+  getMeetCallState?: () => Promise<MeetCallState>;
+  onMeetSelfMic?: (callback: (mic: MeetSelfMic) => void) => () => void;
+  getMeetSelfMic?: () => Promise<MeetSelfMic>;
   minimize: () => void;
   maximize: () => void;
   close: () => void;
@@ -122,6 +146,27 @@ export interface VirtualAudioStatus {
    *   voice.cableInstalled=false   voice is not possible until VB-CABLE is installed
    */
   bridgeModes?: BridgeModeAvailability;
+  /**
+   * The endpoint labels the renderer matches in `enumerateDevices` (case-insensitive substring) to
+   * find each leg's device id, for the provider pair this machine is on. Absent on desktop builds
+   * that predate it and where `supported` is false. See main/virtual-audio.ts.
+   */
+  endpointLabels?: BridgeEndpointLabels;
+}
+
+export interface BridgeEndpointLabels {
+  outboundProviderId: string;
+  /** Render endpoint WarpTalk plays the dub into (`audiooutput`). */
+  outboundSink: string;
+  /** Capture endpoint the user selects as Meet's microphone (`audioinput`). */
+  meetMicrophone: string;
+  inboundProviderId: string | null;
+  /** Capture endpoint WarpTalk records the far side from (`audioinput`). */
+  inboundCapture: string | null;
+  /** Render endpoint Meet's speaker is pointed at when the far side comes back on the device. */
+  meetSpeaker: string | null;
+  /** The bridge still runs without the inbound device (Windows: loopback or outbound-only). */
+  inboundOptional: boolean;
 }
 
 export interface BridgeModeAvailability {
@@ -183,6 +228,54 @@ export interface WindowsLoopbackCaptureRequest {
    * Absent or "voice": the old contract, which requires VB-CABLE (B2 driver-missing without it).
    */
   mode?: "voice" | "text-only";
+  /**
+   * "meet-sighting": main aims the capture at the browser process behind the current Google Meet
+   * sighting and ignores `sourceId`/`targetProcessId`. Refused with R8 `meet-sighting-missing` (no
+   * sighting) or `meet-sighting-no-process` (a platform that cannot name the process); the renderer
+   * then falls back to its picker. Older builds ignore the field.
+   */
+  target?: "meet-sighting";
+  /**
+   * Only with `target: "meet-sighting"`: main stops the capture itself once Meet has been out of
+   * sight for the grace (capture-target.ts) and sends `audio:capture-stopped`. Absent = today's
+   * behaviour, the capture runs until the renderer stops it.
+   */
+  stopWhenMeetGone?: boolean;
+}
+
+/** How the running capture was aimed. */
+export type CaptureStartedVia = "meet-sighting" | "source" | "process-id";
+
+/** `audio:get-capture-state`: what main is capturing, for a main window that reloaded mid-meeting. */
+export interface AudioCaptureState {
+  capturing: boolean;
+  mode: "voice" | "text-only" | null;
+  targetProcessId: number | null;
+  startedVia: CaptureStartedVia | null;
+}
+
+/**
+ * `bridge:arm-meet-window-capture`. `sourceName` is the window title Electron reports for the
+ * source that will be handed out, for logging only - it is written by the page and proves nothing.
+ * `meet-not-on-tab`: Meet is showing in Chrome's picture-in-picture window, not on its tab. The PiP
+ * window is never recorded (WT-910 B18); arm again once the call is back on its tab.
+ */
+export type ArmMeetWindowCaptureResult =
+  | { ok: true; sourceName: string }
+  | {
+      ok: false;
+      reason:
+        | "meet-sighting-missing"
+        | "meet-window-not-found"
+        | "meet-not-on-tab"
+        | "unsupported-platform"
+        | "not-main-window"
+        | "consent-required";
+    };
+
+/** `audio:capture-stopped`: main stopped a capture on its own. */
+export interface AudioCaptureStopped {
+  reason: "meet-gone";
 }
 
 export type WindowsLoopbackStartResult =
@@ -203,7 +296,9 @@ export type WindowsLoopbackStartResult =
         | "pcm-to-track-bridge-not-ready"
         | "silence-padding-not-ready"
         | "target-process-resolver-not-ready"
-        | "target-is-warptalk";
+        | "target-is-warptalk"
+        | "meet-sighting-missing"
+        | "meet-sighting-no-process";
     };
 
 export interface WindowsLoopbackSource {
@@ -254,6 +349,14 @@ export interface MeetCaptionEvent {
   tConfidence: "live" | "batch";
   stale: boolean;
   source: "meet_caption";
+  /**
+   * `alignedNow()` in main at the moment main sent this event to the renderer (a replay from the
+   * 30 s buffer is stamped when it is replayed, not when it was read). The renderer converts the
+   * times above to its own clock with `t + (Date.now() - sentAtMs)`: main's axis is anchored to
+   * Date.now() once at load, so a wall-clock jump since then (NTP, sleep/resume) would otherwise
+   * shift every time. IPC latency (~1 ms) is the residual error. Absent from older desktops.
+   */
+  sentAtMs?: number;
 }
 
 /**
@@ -309,6 +412,63 @@ export interface MeetMicState {
     | "unsupported-platform";
   /** Date.now() of the read. */
   at: number;
+}
+
+/**
+ * `bridge:meet-call-state`: where the user stands with the Google Meet call. See meet-call-state.ts.
+ *
+ *   lobby    on the meeting's page with a mic button but no Leave button: the green room.
+ *   in-call  a Leave button is showing, in the tab (`via:"tab"`) or in Chrome's picture-in-picture
+ *            window (`via:"pip"`).
+ *   left     a readable Meet page for this code with the call controls gone ("You left the
+ *            meeting"). Reported only after it held for two reads about 1.5 s apart. It is also
+ *            what a page the user never joined from looks like, so end a room on it only after an
+ *            `in-call` for the same `meetCode`.
+ *   unknown  nothing readable: no Meet tab is the ACTIVE tab of a window and there is no PiP window
+ *            (UI Automation cannot see a background tab), the buttons could not be recognised,
+ *            the read failed, the watch is disarmed, or the platform has no sensor. It never
+ *            means the call ended - keep whatever was believed before.
+ *
+ * `reason` is a fixed vocabulary for logs and diagnostics ("leave-button-class",
+ * "leave-button-name", "pip-mic-button", "mic-button-no-leave", "rejoin-button",
+ * "no-call-controls", "no-meet-surface", "controls-unrecognised", "empty-tree",
+ * "listing-truncated", "pip-without-controls", "probe-failed", "not-watching",
+ * "unsupported-platform"); do not branch on it.
+ */
+export interface MeetCallState {
+  phase: "lobby" | "in-call" | "left" | "unknown";
+  via: "tab" | "pip" | null;
+  meetCode: string | null;
+  reason: string;
+  /** Date.now() in main when this state was established. */
+  atMs: number;
+}
+
+/**
+ * `bridge:meet-self-mic`: what Meet's own microphone button says.
+ *
+ * Not `MeetMicState` (`bridge:meet-mic-state`), which is unchanged and answers a different
+ * question: which DEVICE the browser records from (cable or a real mic), from Windows Core Audio.
+ * Core Audio cannot see mute - a muted Meet keeps the microphone open - so mute comes from here.
+ *
+ *   muted  true / false as Meet shows it; null when it is not known (never read, the call was
+ *          left, or the button's name and class contradicted each other).
+ *   stale  `muted` is the LAST value read, not a current one: Meet is out of sight (background
+ *          tab without PiP), the read failed, or the window is minimized. Do not act on a stale
+ *          value as if the user had just pressed the button.
+ *   via    "class" = Meet's class tokens (language-independent), "name" = the button's label
+ *          (the fallback when the classes change). Diagnostics only.
+ *
+ * In the lobby the value is the mic the user will join with; whether to act on it before
+ * `MeetCallState.phase` is "in-call" is the consumer's decision.
+ */
+export interface MeetSelfMic {
+  muted: boolean | null;
+  stale: boolean;
+  via: "class" | "name" | null;
+  meetCode: string | null;
+  /** Date.now() in main when this reading was established. */
+  atMs: number;
 }
 
 export interface WindowsLoopbackPcmChunk {
