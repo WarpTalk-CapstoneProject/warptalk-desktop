@@ -101,11 +101,18 @@ test("the tray offers only entries that do something", () => {
     showApp: () => {},
     showMeetingPanel: () => {},
     checkForUpdates: () => {},
+    openLogs: () => {},
     quit: () => {},
   });
   const labels = template.filter((item) => item.label).map((item) => item.label);
   // Start/Stop Translation used to sit between these, with TODO handlers: a click did nothing.
-  assert.deepEqual(labels, ["Show WarpTalk", "Show meeting panel", "Check for Updates…", "Quit"]);
+  assert.deepEqual(labels, [
+    "Show WarpTalk",
+    "Show meeting panel",
+    "Check for Updates…",
+    "Open Logs Folder",
+    "Quit",
+  ]);
   // And no separator is left doubled up where they were.
   const kinds = template.map((item) => (item.type === "separator" ? "-" : "item"));
   assert.ok(!kinds.join(",").includes("-,-"), `adjacent separators: ${kinds.join(",")}`);
