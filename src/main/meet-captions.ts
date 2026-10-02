@@ -812,11 +812,14 @@ export class MeetCaptionStream {
 
 /**
  * `bridgeMeetCaptionNames`: env WARPTALK_BRIDGE_MEET_CAPTION_NAMES = 1/true/on or 0/false/off;
- * unset means ON in dev (unpackaged) and OFF in a packaged build until verified live.
+ * unset means ON, in dev and in packaged builds alike (turned on for production 2026-10-02).
+ * 0/false/off/no stays the kill switch. `isPackaged` is kept so the call sites and a future
+ * per-build default do not have to change.
  */
 export function meetCaptionNamesEnabled(envValue: string | undefined, isPackaged: boolean): boolean {
   const v = (envValue ?? "").trim().toLowerCase();
   if (["1", "true", "on", "yes"].includes(v)) return true;
   if (["0", "false", "off", "no"].includes(v)) return false;
-  return !isPackaged;
+  void isPackaged;
+  return true;
 }

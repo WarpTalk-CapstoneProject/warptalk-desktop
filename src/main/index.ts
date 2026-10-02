@@ -185,7 +185,8 @@ const webRuntime = new WebRuntimeService();
 
 /**
  * Speaker names from Google Meet's own captions (see meet-captions.ts). Windows only; behind the
- * `bridgeMeetCaptionNames` flag (env WARPTALK_BRIDGE_MEET_CAPTION_NAMES, default on in dev).
+ * `bridgeMeetCaptionNames` flag (env WARPTALK_BRIDGE_MEET_CAPTION_NAMES, default ON, dev and
+ * packaged; 0/false/off is the kill switch).
  * The helper is a PowerShell process of its own, started on first use and stopped with the stream.
  */
 const bridgeMeetCaptionNames =
