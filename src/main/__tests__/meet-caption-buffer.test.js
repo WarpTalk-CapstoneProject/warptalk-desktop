@@ -124,3 +124,24 @@ test("clear forgets events and status", () => {
   assert.deepEqual(sent, []);
   assert.deepEqual(statuses, []);
 });
+
+test("stamps sentAtMs at send time, live and replayed, without touching the buffered event", () => {
+  let now = 5_000;
+  const sent = [];
+  const b = new MeetCaptionBuffer({ now: () => now, send: (e) => sent.push(e), sendStatus: () => {} });
+  const early = caption("early");
+  b.event(early); // read at 5000, nobody listening
+  now += 12_000;
+  b.subscribe("abc-defg-hij"); // replayed at 17000
+  now += 500;
+  b.event(caption("live")); // passed straight through at 17500
+  assert.deepEqual(
+    sent.map((e) => [e.blockId, e.sentAtMs]),
+    [
+      ["early", 17_000],
+      ["live", 17_500],
+    ],
+  );
+  assert.equal(early.sentAtMs, undefined, "the caller's object is not mutated");
+  assert.equal(sent[0].tStartMs, 0, "capture times are left as they were");
+});
