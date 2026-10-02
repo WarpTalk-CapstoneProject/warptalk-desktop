@@ -74,6 +74,14 @@ export interface WarpTalkAPI {
    */
   setMeetMicStream?: (enabled: boolean, options?: { browserPid?: number }) => Promise<void>;
   onMeetMicState?: (callback: (state: MeetMicState) => void) => () => void;
+  /**
+   * Recording a bridge meeting with Google Meet's own UI in the picture (WT-910, Windows only).
+   * Arms a one-shot: the NEXT `navigator.mediaDevices.getDisplayMedia()` from the main window
+   * within 10 s is answered with the sighted Meet window - video only, no audio, no picker. Call
+   * it, then call getDisplayMedia straight away. Main window only; requires the loopback capture
+   * (started with consent) to be running. Absent on desktop builds that predate it.
+   */
+  armMeetWindowCapture?: (roomId: string) => Promise<ArmMeetWindowCaptureResult>;
   minimize: () => void;
   maximize: () => void;
   close: () => void;
@@ -233,6 +241,22 @@ export interface AudioCaptureState {
   targetProcessId: number | null;
   startedVia: CaptureStartedVia | null;
 }
+
+/**
+ * `bridge:arm-meet-window-capture`. `sourceName` is the window title Electron reports for the
+ * source that will be handed out, for logging only - it is written by the page and proves nothing.
+ */
+export type ArmMeetWindowCaptureResult =
+  | { ok: true; sourceName: string }
+  | {
+      ok: false;
+      reason:
+        | "meet-sighting-missing"
+        | "meet-window-not-found"
+        | "unsupported-platform"
+        | "not-main-window"
+        | "consent-required";
+    };
 
 /** `audio:capture-stopped`: main stopped a capture on its own. */
 export interface AudioCaptureStopped {

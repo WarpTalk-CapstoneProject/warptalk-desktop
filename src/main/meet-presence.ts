@@ -59,6 +59,12 @@ export class MeetPresenceWatcher {
    * hands the renderer more of the machine than it needs. Capture targeting reads it here.
    */
   private lastProcessId: number | null = null;
+  /**
+   * The HWND behind the last sighting, for the same reason and with the same rule as
+   * `lastProcessId`: main-process only, never part of `MeetPresence`. Recording the meeting
+   * (meet-window-capture.ts) reads it to pick the window source without a picker.
+   */
+  private lastWindowHandle: number | null = null;
 
   private readonly options: MeetPresenceWatcherOptions;
 
@@ -73,6 +79,11 @@ export class MeetPresenceWatcher {
   /** The browser process the last sighting belonged to, for aiming capture. Main-process only. */
   get meetProcessId(): number | null {
     return this.lastProcessId;
+  }
+
+  /** The window the last sighting was read from, for window capture. Main-process only. */
+  get meetWindowHandle(): number | null {
+    return this.lastWindowHandle;
   }
 
   /** Whether the last poll saw a Meet window. False while disarmed or before the first answer. */
@@ -96,6 +107,7 @@ export class MeetPresenceWatcher {
     // observation from a previous meeting and staying silent because nothing "changed".
     this.last = null;
     this.lastProcessId = null;
+    this.lastWindowHandle = null;
     this.polling = false;
   }
 
@@ -129,6 +141,7 @@ export class MeetPresenceWatcher {
     // why the field is optional and why nothing downstream may require it to believe a sighting.
     if (sighting?.meetCode) presence.meetCode = sighting.meetCode;
     this.lastProcessId = sighting?.processId ?? null;
+    this.lastWindowHandle = sighting?.windowHandle ?? null;
 
     if (
       this.last &&

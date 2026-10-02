@@ -44,6 +44,13 @@ export interface MeetSighting {
    * Null from the macOS sensor, which asks the browser over Apple Events and never sees a window.
    */
   processId: number | null;
+  /**
+   * The top-level HWND the sighting was read from, as a decimal number. It is what Electron puts
+   * in a window source id (`window:<HWND>:0`), so it lets main hand exactly this window to a
+   * screen capture without asking the page which window to take (meet-window-capture.ts).
+   * Kept in main like `processId`. Absent from the macOS sensor and from older payloads.
+   */
+  windowHandle?: number | null;
   /** Which read produced this, for diagnosing a machine where one path works and the other does not. */
   via: "document" | "pip";
 }
@@ -134,7 +141,7 @@ function Read-Window($w) {
       # Exact host equality, never a substring: 'evil.com/meet.google.com/abc-def-ghi' and
       # 'meet.google.com.evil.com' both contain the string and neither is Google.
       if ($uri.Host -eq 'meet.google.com' -and $uri.AbsolutePath -match $CODE_PATH) {
-        return @{ meetCode = $Matches[1]; processId = $w.Pid; via = 'document' }
+        return @{ meetCode = $Matches[1]; processId = $w.Pid; windowHandle = $w.H.ToInt64(); via = 'document' }
       }
     } catch {}
     # A page with a real address is a page, and that address was not Meet. Nothing else in this
@@ -153,7 +160,7 @@ function Read-Window($w) {
   $labels = $el.FindAll([System.Windows.Automation.TreeScope]::Descendants, $hostLabelCond)
   for ($i = 0; $i -lt $labels.Count; $i++) {
     if (-not (Test-InDocument $labels.Item($i) $el)) {
-      return @{ meetCode = $null; processId = $w.Pid; via = 'pip' }
+      return @{ meetCode = $null; processId = $w.Pid; windowHandle = $w.H.ToInt64(); via = 'pip' }
     }
   }
   return $null
