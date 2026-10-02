@@ -257,6 +257,8 @@ export interface AudioCaptureState {
 /**
  * `bridge:arm-meet-window-capture`. `sourceName` is the window title Electron reports for the
  * source that will be handed out, for logging only - it is written by the page and proves nothing.
+ * `meet-not-on-tab`: Meet is showing in Chrome's picture-in-picture window, not on its tab. The PiP
+ * window is never recorded (WT-910 B18); arm again once the call is back on its tab.
  */
 export type ArmMeetWindowCaptureResult =
   | { ok: true; sourceName: string }
@@ -265,6 +267,7 @@ export type ArmMeetWindowCaptureResult =
       reason:
         | "meet-sighting-missing"
         | "meet-window-not-found"
+        | "meet-not-on-tab"
         | "unsupported-platform"
         | "not-main-window"
         | "consent-required";

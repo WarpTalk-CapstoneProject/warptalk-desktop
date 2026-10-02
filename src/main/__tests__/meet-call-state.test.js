@@ -257,6 +257,27 @@ test("presence: a 'you left' page stays a sighting - the phase travels beside it
   assert.deepEqual(sightingFromScan(sighting, [tabSurface(`${LIVE}meet-s4-left-1.json`)]), sighting);
 });
 
+test("presence: the in-call surface's window handle replaces the URL read's (WT-910 recording)", () => {
+  // The URL read preferred the normal window; the call itself is in the PiP window.
+  const [inPip] = parseMeetSurfaces([{ ...pip().micOn, windowHandle: 3333 }]);
+  assert.equal(inPip.windowHandle, 3333);
+  assert.deepEqual(sightingFromScan({ meetCode: null, processId: 4242, windowHandle: 2222, via: "document" }, [inPip]), {
+    meetCode: "hqw-cmis-waa",
+    processId: 4242,
+    windowHandle: 3333,
+    via: "pip",
+  });
+  // A malformed handle is dropped, not trusted.
+  for (const windowHandle of [0, -1, 1.5, "3333", null]) {
+    const [surface] = parseMeetSurfaces([{ ...pip().micOn, windowHandle }]);
+    assert.equal("windowHandle" in surface, false);
+  }
+});
+
+test("presence: the helper reports each surface's window handle", () => {
+  assert.match(MEET_SURFACE_SCRIPT, /windowHandle = \$w\.H\.ToInt64\(\)/);
+});
+
 test("presence: nothing seen stays nothing seen", () => {
   assert.equal(sightingFromScan(null, []), null);
 });

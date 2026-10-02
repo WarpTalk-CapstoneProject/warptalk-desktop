@@ -65,6 +65,8 @@ export class MeetPresenceWatcher {
    * (meet-window-capture.ts) reads it to pick the window source without a picker.
    */
   private lastWindowHandle: number | null = null;
+  /** Which read the last sighting came from: a normal tab ("document") or Chrome's PiP window. */
+  private lastVia: "document" | "pip" | null = null;
 
   private readonly options: MeetPresenceWatcherOptions;
 
@@ -84,6 +86,11 @@ export class MeetPresenceWatcher {
   /** The window the last sighting was read from, for window capture. Main-process only. */
   get meetWindowHandle(): number | null {
     return this.lastWindowHandle;
+  }
+
+  /** Whether the last sighting was Chrome's picture-in-picture window rather than the Meet tab. */
+  get meetWindowVia(): "document" | "pip" | null {
+    return this.lastVia;
   }
 
   /** Whether the last poll saw a Meet window. False while disarmed or before the first answer. */
@@ -108,6 +115,7 @@ export class MeetPresenceWatcher {
     this.last = null;
     this.lastProcessId = null;
     this.lastWindowHandle = null;
+    this.lastVia = null;
     this.polling = false;
   }
 
@@ -142,6 +150,7 @@ export class MeetPresenceWatcher {
     if (sighting?.meetCode) presence.meetCode = sighting.meetCode;
     this.lastProcessId = sighting?.processId ?? null;
     this.lastWindowHandle = sighting?.windowHandle ?? null;
+    this.lastVia = sighting?.via ?? null;
 
     if (
       this.last &&

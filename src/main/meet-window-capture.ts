@@ -35,10 +35,14 @@
  *   trusting titles in the first place — so there is deliberately no title fallback: no HWND, no
  *   recording (`meet-window-not-found`), and the web app records without the window.
  *
- * WHAT IT DOES NOT COVER
- *   A picture-in-picture-only sighting arms the PiP window, which is all of Meet there is on screen.
- *   A window capture shows what the window shows: switch the Meet tab away and the recording shows
- *   the other tab. macOS has no HWND and no sensor PID; it answers `unsupported-platform`.
+ * PICTURE-IN-PICTURE AND OTHER TABS (B18, PO decision 2026-10-02)
+ *   The PiP window is never recorded: while Meet shows there, or the call-state tracker says the
+ *   call is in PiP, an arm is refused with `meet-not-on-tab`. A window capture shows what the window
+ *   shows, so a granted capture of the browser window would show another tab after a tab switch;
+ *   the web app stops publishing the track while Meet is off its tab (`watchMeetCall`) and arms
+ *   again when the tab is back. Arming is repeatable for that reason: each arm replaces the last,
+ *   and only the first grant for a room announces the recording.
+ *   macOS has no HWND and no sensor PID; it answers `unsupported-platform`.
  */
 
 import type { ArmMeetWindowCaptureResult } from "../shared/types.ts";
@@ -75,11 +79,16 @@ export interface MeetWindowSightingSnapshot {
   armed: boolean;
   visible: boolean;
   windowHandle: number | null;
+  /**
+   * Meet is showing in Chrome's picture-in-picture window: the last sighting came from it, or the
+   * call-state tracker places the call there. Optional so older callers read as "not known".
+   */
+  inPictureInPicture?: boolean;
 }
 
 export type MeetWindowSourceResolution<S> =
   | { ok: true; source: S }
-  | { ok: false; reason: "meet-sighting-missing" | "meet-window-not-found" };
+  | { ok: false; reason: "meet-sighting-missing" | "meet-window-not-found" | "meet-not-on-tab" };
 
 /**
  * The window source that is the sighted Meet window, matched by HWND and nothing else.
@@ -92,6 +101,8 @@ export function resolveMeetWindowSource<S extends { id: string }>(
   sources: ReadonlyArray<S>,
 ): MeetWindowSourceResolution<S> {
   if (!sighting.armed || !sighting.visible) return { ok: false, reason: "meet-sighting-missing" };
+  // B18: the PiP window is never recorded, whatever its handle.
+  if (sighting.inPictureInPicture === true) return { ok: false, reason: "meet-not-on-tab" };
   const handle = sighting.windowHandle;
   if (typeof handle !== "number" || !Number.isSafeInteger(handle) || handle <= 0) {
     return { ok: false, reason: "meet-window-not-found" };

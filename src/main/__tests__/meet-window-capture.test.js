@@ -159,3 +159,52 @@ test("watcher: keeps the sighting's HWND in main, never in the presence it emits
   watcher.disarm();
   assert.equal(watcher.meetWindowHandle, null);
 });
+
+test("B18: Meet in picture-in-picture is never armed, whatever its handle", () => {
+  const pipSources = [...sources, { id: "window:3333:0", name: "Meet - abc-defg-hij" }];
+  assert.deepEqual(
+    resolveMeetWindowSource({ armed: true, visible: true, windowHandle: 3333, inPictureInPicture: true }, pipSources),
+    { ok: false, reason: "meet-not-on-tab" },
+  );
+  // Even a handle that is the browser window: the tracker says the call is in PiP, so the tab is not Meet.
+  assert.deepEqual(
+    resolveMeetWindowSource({ armed: true, visible: true, windowHandle: 2222, inPictureInPicture: true }, sources),
+    { ok: false, reason: "meet-not-on-tab" },
+  );
+  // Back on the tab: the same window resolves again (the web app re-arms after a tab return).
+  assert.deepEqual(
+    resolveMeetWindowSource({ armed: true, visible: true, windowHandle: 2222, inPictureInPicture: false }, sources),
+    { ok: true, source: sources[1] },
+  );
+});
+
+test("B18: a re-arm after the first grant is granted again, and does not announce the recording twice", () => {
+  const arm = new MeetWindowCaptureArm();
+  arm.arm({ webContentsId: 7, source: sources[1], roomId: "room-1" }, 0);
+  assert.equal(arm.take(7, 5).firstForRoom, true);
+  // Meet went to PiP and came back: the web app arms again for the same room.
+  arm.arm({ webContentsId: 7, source: sources[1], roomId: "room-1" }, 60_000);
+  assert.deepEqual(arm.take(7, 60_010), { source: sources[1], roomId: "room-1", firstForRoom: false });
+});
+
+test("watcher: remembers whether the last sighting was the PiP window, and forgets it on disarm", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let sighting = { meetCode: "abc-defg-hij", processId: 4242, windowHandle: 2222, via: "document" };
+  const watcher = new MeetPresenceWatcher({
+    readMeetSighting: async () => sighting,
+    onChange: () => {},
+    intervalMs: 3000,
+    now: () => 1000,
+  });
+  watcher.arm();
+  await flush();
+  assert.equal(watcher.meetWindowVia, "document");
+
+  sighting = { meetCode: "abc-defg-hij", processId: 4242, windowHandle: 3333, via: "pip" };
+  t.mock.timers.tick(3000);
+  await flush();
+  assert.equal(watcher.meetWindowVia, "pip");
+
+  watcher.disarm();
+  assert.equal(watcher.meetWindowVia, null);
+});

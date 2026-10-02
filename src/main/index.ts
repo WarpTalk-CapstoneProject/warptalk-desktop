@@ -430,6 +430,8 @@ function registerIpcHandlers(): void {
           armed: meetPresenceWatcher.armed,
           visible: meetPresenceWatcher.meetWindowVisible,
           windowHandle: meetPresenceWatcher.meetWindowHandle,
+          inPictureInPicture:
+            meetPresenceWatcher.meetWindowVia === "pip" || meetCallTracker.callState.via === "pip",
         },
         sources,
       );
