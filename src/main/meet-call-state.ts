@@ -83,6 +83,12 @@ export interface MeetSurface {
   /** From the address (tab) or the window title `Meet - <code>` (pip). */
   meetCode: string;
   processId: number | null;
+  /**
+   * The top-level HWND this surface was read from (the tab's browser window, or the PiP window),
+   * so a sighting built from it can still name the window to capture (meet-window-capture.ts).
+   * Absent from older helper payloads.
+   */
+  windowHandle?: number | null;
   /** The window is minimized. Chrome may stop updating the tree then (not measured). */
   minimized?: boolean;
   /** The listing hit the helper's cap; a control past it may be missing. */
@@ -106,6 +112,7 @@ export function parseMeetSurfaces(raw: unknown): MeetSurface[] {
     const code = item.meetCode;
     if ((kind !== "tab" && kind !== "pip") || typeof code !== "string" || !MEET_CODE.test(code)) continue;
     const pid = item.processId;
+    const hwnd = item.windowHandle;
     const buttons: MeetButton[] = [];
     for (const b of asArray(item.buttons as Record<string, unknown> | Record<string, unknown>[] | null)) {
       if (!b || typeof b !== "object") continue;
@@ -115,6 +122,7 @@ export function parseMeetSurfaces(raw: unknown): MeetSurface[] {
       surface: kind,
       meetCode: code,
       processId: typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? pid : null,
+      ...(typeof hwnd === "number" && Number.isSafeInteger(hwnd) && hwnd > 0 ? { windowHandle: hwnd } : {}),
       minimized: item.minimized === true,
       truncated: item.truncated === true,
       buttons,
@@ -410,9 +418,13 @@ export function classifyMeetCall(surfaces: MeetSurface[]): MeetCallClassificatio
 export function sightingFromScan(sighting: MeetSighting | null, surfaces: MeetSurface[]): MeetSighting | null {
   const best = classifyMeetCall(surfaces);
   if (best.call.phase === "in-call" && best.surface) {
+    // The window goes with it: the sighting it replaces may have been read from another window
+    // (the URL read prefers a normal window), and a recording must capture the one the call is in.
+    const windowHandle = best.surface.windowHandle;
     return {
       meetCode: best.surface.meetCode,
       processId: best.surface.processId,
+      ...(typeof windowHandle === "number" ? { windowHandle } : {}),
       via: best.surface.surface === "tab" ? "document" : "pip",
     };
   }
@@ -484,7 +496,7 @@ function Get-MeetSurface($w, $doc, $value) {
   }
   $buttons = Get-MeetButtons $doc
   return @{
-    surface = $kind; meetCode = $code; processId = $w.Pid
+    surface = $kind; meetCode = $code; processId = $w.Pid; windowHandle = $w.H.ToInt64()
     minimized = [bool][MeetWin]::IsIconic($w.H)
     truncated = [bool]$buttons.truncated
     buttons = $buttons.list

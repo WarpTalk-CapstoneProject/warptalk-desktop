@@ -7,6 +7,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 import type {
+  ArmMeetWindowCaptureResult,
   AudioCaptureState,
   AudioCaptureStopped,
   DesktopRuntimeCapability,
@@ -136,6 +137,9 @@ contextBridge.exposeInMainWorld("warptalk", {
     ipcRenderer.on("bridge:meet-mic-state", listener);
     return () => ipcRenderer.off("bridge:meet-mic-state", listener);
   },
+  // One-shot: the next getDisplayMedia from the main window takes the sighted Meet window (WT-910).
+  armMeetWindowCapture: (roomId: string): Promise<ArmMeetWindowCaptureResult> =>
+    ipcRenderer.invoke("bridge:arm-meet-window-capture", roomId),
 
   // In the Meet call or not, and Meet's own mute button (tab or picture-in-picture). See
   // meet-call-state.ts. Fed by the presence watch; the getters are for a late subscriber.
