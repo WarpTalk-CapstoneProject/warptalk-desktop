@@ -1,6 +1,6 @@
 {
   "name": "warptalk-desktop",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "description": "WarpTalk - Cross-platform real-time translation client",
   "main": "out/main/index.js",
   "author": {
