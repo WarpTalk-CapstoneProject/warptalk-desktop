@@ -555,9 +555,13 @@ test("stream: sensor state live / tab inactive / minimized, and a batch after un
   assert.equal(statuses.at(-1).running, false);
 });
 
-test("bridgeMeetCaptionNames flag: env wins, otherwise on in dev and off when packaged", () => {
+test("bridgeMeetCaptionNames flag: env wins, otherwise on in dev and in packaged builds", () => {
   assert.equal(meetCaptionNamesEnabled(undefined, false), true);
-  assert.equal(meetCaptionNamesEnabled(undefined, true), false);
+  assert.equal(meetCaptionNamesEnabled(undefined, true), true);
+  assert.equal(meetCaptionNamesEnabled("", true), true);
   assert.equal(meetCaptionNamesEnabled("1", true), true);
-  assert.equal(meetCaptionNamesEnabled("off", false), false);
+  for (const off of ["0", "false", "off", "no", " OFF "]) {
+    assert.equal(meetCaptionNamesEnabled(off, true), false, `kill switch ${JSON.stringify(off)} when packaged`);
+    assert.equal(meetCaptionNamesEnabled(off, false), false, `kill switch ${JSON.stringify(off)} in dev`);
+  }
 });
