@@ -153,9 +153,71 @@ test("an unknown language: the classes still give the phase and the mute", () =>
   const lobby = classifyMeetCall([unknownLanguage(tabSurface(`${LIVE}meet-s1-lobby-1.json`))]);
   assert.equal(lobby.call.phase, "lobby");
 
-  // No Rejoin label to recognise: the missing toolbar is what says "left".
+  // No Rejoin label to recognise: the post-call page's own button classes say "left".
   const left = classifyMeetCall([unknownLanguage(tabSurface(`${LIVE}meet-s4-left-1.json`))]);
-  assert.deepEqual(left.call, { phase: "left", via: "tab", meetCode: "csk-fzok-ssx", reason: "no-call-controls" });
+  assert.deepEqual(left.call, { phase: "left", via: "tab", meetCode: "csk-fzok-ssx", reason: "left-page-class" });
+});
+
+// ---------------------------------------------------------------------------------------------
+// "left" needs positive evidence (bug 2026-10-03, desktop 0.4.11: LiveKit dropped, Meet read as
+// "left" with reason no-call-controls, the bridge capture stopped while the user was in the call)
+// ---------------------------------------------------------------------------------------------
+
+test("no recognisable call controls is unknown, never left", () => {
+  const incall = tabSurface(`${LIVE}meet-s2a-incall-1.json`);
+  const variants = {
+    // A tree caught mid-rebuild, or Meet's reconnecting overlay: a couple of unrelated buttons.
+    "partial tree": [{ n: "Dismiss", c: "mUIrbf-LgbsSe" }, { n: "", c: "VfPpkd-Bz112c-LgbsSe" }],
+    // Only the extension's injected buttons came back (they never count as Meet's).
+    "extension buttons only": incall.buttons.filter((b) => /[[\]:/#]/.test(b.c.split(/\s+/)[0] ?? "")),
+    // The toolbar is gone from the tree, everything else is still there.
+    "toolbar stripped": incall.buttons.filter((b) => !/\bVYBDae-Bz112c-LgbsSe\b/.test(b.c)),
+  };
+  for (const [label, buttons] of Object.entries(variants)) {
+    assert.ok(buttons.length > 0, `${label}: the variant must not be the empty-tree case`);
+    const { call, mic } = classifyMeetCall([{ ...incall, buttons }]);
+    assert.deepEqual({ phase: call.phase, reason: call.reason }, { phase: "unknown", reason: "no-call-controls" }, label);
+    assert.equal(mic.muted, null, label);
+  }
+});
+
+test("the post-call page in an unknown language AND with renamed classes is unknown, not guessed", () => {
+  const { call } = classifyMeetCall([unknownLanguage(renamedClasses(tabSurface(`${LIVE}meet-s4-left-1.json`)))]);
+  assert.deepEqual({ phase: call.phase, reason: call.reason }, { phase: "unknown", reason: "no-call-controls" });
+});
+
+test("the post-call page is recognised by its Return to home screen button alone", () => {
+  for (const n of ["Quay lại màn hình chính", "Return to home screen"]) {
+    const surface = { surface: "tab", meetCode: "abc-defg-hij", processId: 1, buttons: [{ n, c: "zz1" }, { n: "Feedback", c: "zz2" }] };
+    assert.deepEqual({ phase: classifyMeetCall([surface]).call.phase, reason: classifyMeetCall([surface]).call.reason }, {
+      phase: "left",
+      reason: "return-home-button",
+    }, n);
+  }
+});
+
+test("a post-call button inside a live, unreadable toolbar is not the post-call page", () => {
+  const toolbar = unknownLanguage(renamedClasses(tabSurface(`${LIVE}meet-s2a-incall-1.json`)));
+  const buttons = [...toolbar.buttons, { n: "Rejoin", c: "zz" }];
+  assert.equal(classifyMeetCall([{ ...toolbar, buttons }]).call.reason, "controls-unrecognised");
+});
+
+test("tracker: a long run of reads without controls (WarpTalk reconnecting) never ends the call", () => {
+  const { instance, clock, calls, mics } = tracker();
+  instance.ingest(incallMuted());
+  const noControls = [{ surface: "tab", meetCode: "hqw-cmis-waa", processId: 4242, buttons: [{ n: "Dismiss", c: "mUIrbf-LgbsSe" }] }];
+  for (let i = 0; i < 40; i++) {
+    clock.ms += 1000;
+    instance.ingest(noControls);
+  }
+  assert.ok(calls.every((c) => c.phase !== "left"), JSON.stringify(calls.map((c) => c.phase)));
+  assert.equal(instance.callState.phase, "unknown");
+  // The mic is kept (stale), not cleared as it would be for a real leave.
+  assert.deepEqual({ muted: mics.at(-1).muted, stale: mics.at(-1).stale }, { muted: true, stale: true });
+  // Controls back: in the call again on the first read.
+  clock.ms += 1000;
+  instance.ingest(incallMuted());
+  assert.equal(instance.callState.phase, "in-call");
 });
 
 test("renamed classes AND an unknown language: unknown, never 'left'", () => {
