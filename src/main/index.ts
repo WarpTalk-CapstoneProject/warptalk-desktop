@@ -171,11 +171,11 @@ const meetCallTracker = new MeetCallStateTracker({
   probe:
     meetUrlSensor instanceof MeetUrlSensor
       ? async () => {
-          const scan = await meetUrlSensor.scan("state");
+          const scan = await meetUrlSensor.scan("state", meetCallTracker.tabWatchList);
           // The same read refreshes presence's window and PiP flag, so an arm never leans on a
           // sighting older than this second (meetWindowForArm, WT-910).
           meetPresenceWatcher.noteWindow(scan.sighting);
-          return scan.surfaces;
+          return { surfaces: scan.surfaces, full: scan.full, tabChecks: scan.tabChecks };
         }
       : null,
   emitCallState: (state) => {
@@ -192,6 +192,18 @@ const meetCallTracker = new MeetCallStateTracker({
   onMicRead: (read) => {
     mainLog?.info("meet", "self mic read", read);
   },
+  // A closed Meet tab is told from a background one by the tab strip (meet-tab-identity.ts). Each
+  // remembered tab, and each change of what a read without any Meet surface decided, goes to
+  // main.log: the incident this exists for (2026-10-03) left no trace of either.
+  onTabEvent: (event) => {
+    if (event.kind === "identity") {
+      const { meetCode, windowHandle, runtimeId, lastTitle } = event.identity;
+      mainLog?.info("meet", "tab remembered", { meetCode, windowHandle, runtimeId, title: lastTitle });
+    } else {
+      const { meetCode, left, reason, tabs } = event;
+      mainLog?.info("meet", "tab verdict", { meetCode, verdict: left ? "left" : "unknown", reason, tabs });
+    }
+  },
 });
 // The sensor picks its sighting's window with the tracker's own tie-break, so presence and the call
 // state never name two different Meet windows (sightingFromScan).
@@ -201,8 +213,10 @@ if (meetUrlSensor instanceof MeetUrlSensor) meetUrlSensor.setWindowPreference(()
 async function readMeetSighting(): Promise<Awaited<ReturnType<MeetUrlSensor["read"]>>> {
   if (!(meetUrlSensor instanceof MeetUrlSensor)) return meetUrlSensor.read();
   try {
-    const scan = await meetUrlSensor.scan("look");
-    meetCallTracker.ingest(scan.surfaces);
+    // The 3 s look keeps running after presence loses Meet (the fast loop does not), so it is what
+    // carries a closed tab's verdict (meet-tab-identity.ts).
+    const scan = await meetUrlSensor.scan("look", meetCallTracker.tabWatchList);
+    meetCallTracker.ingest(scan.surfaces, { full: scan.full, tabChecks: scan.tabChecks });
     return scan.sighting;
   } catch (error) {
     meetCallTracker.ingestFailure();
@@ -1178,6 +1192,8 @@ async function openTranscriptWindow(
   win.on("closed", () => {
     const dismissed = transcriptPanel.closed(win);
     if (!dismissed) return;
+    // The user's own close: the datum a field log was missing on 2026-10-03.
+    mainLog?.info("bridge", "transcript popup closed by user", { roomId: dismissed.roomId });
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("bridge:transcript-window-closed", dismissed.roomId);
     }
