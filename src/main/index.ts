@@ -66,7 +66,7 @@ import {
 import { MeetMicStateStream, MicSessionSensor } from "./meet-mic-state";
 import { MeetCallStateTracker } from "./meet-call-state";
 import { meetWindowForArm } from "./meet-window-geometry";
-import { TranscriptPanelLedger } from "./transcript-panel";
+import { PanelNavigator, TranscriptPanelLedger } from "./transcript-panel";
 import { SignedOutMeetPrompt } from "./signed-out-meet-prompt";
 import { trayMenuTemplate } from "./tray-menu";
 import { shouldHideOnClose, shouldIgnoreBeforeUnload } from "./quit-lifecycle";
@@ -117,6 +117,14 @@ import {
 let mainWindow: BrowserWindow | null = null;
 /** The bridge popup, and what the web app asked it to show. See transcript-panel.ts. */
 const transcriptPanel = new TranscriptPanelLedger<BrowserWindow>();
+/** Loads the popup once per target; a replaced load is not "the web UI is unreachable". */
+const transcriptNavigator = new PanelNavigator<BrowserWindow>({
+  currentUrl: (win) => win.webContents.getURL(),
+  load: (win, target) => win.loadURL(target),
+  loadFallback: (win) => win.loadFile(path.join(__dirname, "../renderer/index.html")),
+  isDestroyed: (win) => win.isDestroyed(),
+  report: (message, error) => console.error(message, error),
+});
 let tray: Tray | null = null;
 /** The tray icon as loaded, and with the "update waiting" dot. See tray-badge.ts. */
 let trayIcon: Electron.NativeImage | null = null;
@@ -1118,6 +1126,11 @@ async function openTranscriptWindow(
 
   const existing = transcriptPanel.window;
   if (existing && !existing.isDestroyed()) {
+    // Still being created for this very meeting: `ready-to-show` reveals and announces it once.
+    if (transcriptNavigator.isLoading(existing, target)) {
+      await transcriptNavigator.go(existing, target);
+      return;
+    }
     if (existing.isMinimized()) existing.restore();
     existing.show();
     existing.focus();
@@ -1125,13 +1138,7 @@ async function openTranscriptWindow(
     transcriptPanel.shown(existing, roomId);
     // Reusing the window is not the same as leaving it where it was: the web app moving from one
     // room to the next must not leave the popup showing the previous room's transcript.
-    if (existing.webContents.getURL() !== target) {
-      try {
-        await existing.loadURL(target);
-      } catch (error) {
-        console.error("Failed to move the bridge window:", error);
-      }
-    }
+    await transcriptNavigator.go(existing, target);
     return;
   }
 
@@ -1222,18 +1229,7 @@ async function openTranscriptWindow(
     return { action: "deny" };
   });
 
-  try {
-    await win.loadURL(target);
-  } catch (error) {
-    console.error("Failed to load the transcript view:", error);
-    if (win.isDestroyed()) return;
-    try {
-      await win.loadFile(path.join(__dirname, "../renderer/index.html"));
-    } catch (fallbackError) {
-      console.error("Failed to load the fallback renderer:", fallbackError);
-    }
-  }
-
+  await transcriptNavigator.go(win, target);
 }
 
 /**
