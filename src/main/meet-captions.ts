@@ -744,6 +744,17 @@ export interface MeetCaptionStreamSummary {
   /** Events emitted (each one a speaker-name hint), and how many distinct speakers they named. */
   events: number;
   speakers: number;
+  /**
+   * Why `events` can be 0 while captions were read. Of the reads with captions: how many showed
+   * only the local user's own blocks ("Bạn" / "You", never emitted by design) and how many showed
+   * a block of somebody else; and how many distinct other speakers the parser found. Alone in the
+   * call = `selfOnlyReads == readsWithCaptions`, `otherSpeakers 0`: nothing to name, not a failure.
+   * `otherSpeakers > 0` with `events 0` is a tracker/emission fault; `readsWithOthers 0` while
+   * Meet-side people spoke is a parse fault (their header taken for self or for a text line).
+   */
+  selfOnlyReads: number;
+  readsWithOthers: number;
+  otherSpeakers: number;
   periodMs: number;
 }
 
@@ -765,7 +776,7 @@ export class MeetCaptionStream {
   private lastStatusKey = "";
   private lastState: MeetCaptionStatus["state"] = "unavailable_tab_inactive";
   private lastCaptionsVisible = false;
-  private period = { startMs: 0, reads: 0, readsWithCaptions: 0, events: 0, speakers: new Set<string>() };
+  private period = MeetCaptionStream.emptyPeriod(0);
 
   constructor(options: MeetCaptionStreamOptions) {
     this.options = options;
@@ -821,8 +832,21 @@ export class MeetCaptionStream {
     this.options.emit(event);
   }
 
+  private static emptyPeriod(startMs: number) {
+    return {
+      startMs,
+      reads: 0,
+      readsWithCaptions: 0,
+      selfOnlyReads: 0,
+      readsWithOthers: 0,
+      events: 0,
+      speakers: new Set<string>(),
+      otherSpeakers: new Set<string>(),
+    };
+  }
+
   private resetPeriod(now: number): void {
-    this.period = { startMs: now, reads: 0, readsWithCaptions: 0, events: 0, speakers: new Set() };
+    this.period = MeetCaptionStream.emptyPeriod(now);
   }
 
   private summarize(now: number, force: boolean): void {
@@ -838,6 +862,9 @@ export class MeetCaptionStream {
       readsWithCaptions: p.readsWithCaptions,
       events: p.events,
       speakers: p.speakers.size,
+      selfOnlyReads: p.selfOnlyReads,
+      readsWithOthers: p.readsWithOthers,
+      otherSpeakers: p.otherSpeakers.size,
       periodMs,
     });
     this.resetPeriod(now);
@@ -868,7 +895,13 @@ export class MeetCaptionStream {
         captionsVisible = blocks !== null;
       }
       this.period.reads++;
-      if (blocks !== null) this.period.readsWithCaptions++;
+      if (blocks !== null) {
+        this.period.readsWithCaptions++;
+        const others = blocks.filter((b) => !b.isSelf && b.text);
+        if (others.length > 0) this.period.readsWithOthers++;
+        else if (blocks.some((b) => b.isSelf)) this.period.selfOnlyReads++;
+        for (const b of others) this.period.otherSpeakers.add(b.speaker);
+      }
       for (const event of tracker.ingest(now, blocks)) this.emitEvent(event);
     } catch (e) {
       if (generation !== this.generation) return;
