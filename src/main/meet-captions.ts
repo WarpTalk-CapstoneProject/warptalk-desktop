@@ -294,10 +294,27 @@ export function captionTexts(region: UiaNode): string[] {
   return out;
 }
 
+const SENTENCE_END = /[.?!,;:…。？！，、]$/;
+/** Longer than any display name; also the bound of the repeated-header rule. */
+const MAX_SPEAKER_CHARS = 60;
+
+/**
+ * Meet's own components carry an obfuscated, mixed-case class family ("oZRSLe"). An extension's
+ * markup carries none or readable lower-case utility classes ("wrap-anywhere flex-1").
+ */
+function isMeetFamily(family: string): boolean {
+  return !isUtilityFamily(family) && /[A-Z]/.test(family);
+}
+
 /**
  * Names on participant tiles: a Text that is the only child of its Group, outside the region and
  * the call controls. Meet promotes the active speaker into a visible tile, which is what makes
  * this a useful header signal.
+ *
+ * Only Meet's own Groups count, and only a Text that can be a name. A transcript extension
+ * (Tactiq) lists every caption line as a Group holding one Text, in the same document: read as
+ * tiles, those lines became "participants" and each one then split the real speaker's turn into
+ * a block named after their own words.
  */
 export function tileNames(root: UiaNode, exclude: (UiaNode | null)[]): Set<string> {
   const names = new Set<string>();
@@ -305,8 +322,9 @@ export function tileNames(root: UiaNode, exclude: (UiaNode | null)[]): Set<strin
   const visit = (node: UiaNode): void => {
     if (skip.has(node)) return;
     const kids = childrenOf(node);
-    if (node.type === "Group" && kids.length === 1 && kids[0].type === "Text" && kids[0].name.trim()) {
-      names.add(kids[0].name.trim());
+    if (node.type === "Group" && kids.length === 1 && kids[0].type === "Text" && isMeetFamily(classFamily(node.className))) {
+      const name = kids[0].name.trim();
+      if (name && name.length <= MAX_SPEAKER_CHARS && !SENTENCE_END.test(name)) names.add(name);
     }
     kids.forEach(visit);
   };
@@ -320,7 +338,14 @@ export interface CaptionBlock {
   isSelf: boolean;
 }
 
-const SENTENCE_END = /[.?!,;:…。？！，、]$/;
+/** How many caption lines `SpokenLines` remembers; a Meet history holds far fewer. */
+const MAX_SPOKEN_LINES = 500;
+
+/**
+ * Every caption line already read as someone's words -> the speaker of the turn it was read in.
+ * See `parseCaptionTexts`: this is what makes a turn keep the name it was first given.
+ */
+export type SpokenLines = Map<string, string>;
 
 /**
  * Splits the flat Text list into (speaker, text) blocks. Lines of a block are joined with a space.
@@ -329,24 +354,50 @@ const SENTENCE_END = /[.?!,;:…。？！，、]$/;
  * or seen before), or a short (<= 60 chars) Text without sentence punctuation that occurs more
  * than once - a speaker name repeats with every turn, a wrapped caption line almost never does.
  * Weakness, accepted: a speaker who is on no tile and speaks once is merged into the previous block.
+ *
+ * A TURN KEEPS ITS NAME (`spoken`, which this function reads and adds to)
+ *     Once a line has been read as a speaker's words it stays that speaker's: a later reading
+ *     cannot promote it to a header, so the name of a turn is taken once and not derived again
+ *     from a tree that may by then say something else. Only a name already accepted (self,
+ *     `knownSpeakers`) or the repeat rule outranks it. When Meet trims its history in the middle
+ *     of a turn the first Text is such a line, and the block it opens carries the remembered
+ *     speaker instead of being named after the line.
  */
-export function parseCaptionTexts(texts: string[], knownSpeakers: Set<string> = new Set()): CaptionBlock[] {
+export function parseCaptionTexts(
+  texts: string[],
+  knownSpeakers: Set<string> = new Set(),
+  spoken?: SpokenLines,
+): CaptionBlock[] {
   const counts = new Map<string, number>();
   for (const t of texts) counts.set(t, (counts.get(t) ?? 0) + 1);
-  const isHeader = (t: string, index: number): boolean =>
-    index === 0 ||
-    isSelfSpeaker(t) ||
-    knownSpeakers.has(t) ||
-    ((counts.get(t) ?? 0) > 1 && t.length <= 60 && !SENTENCE_END.test(t));
+  const repeats = (t: string): boolean =>
+    (counts.get(t) ?? 0) > 1 && t.length <= MAX_SPEAKER_CHARS && !SENTENCE_END.test(t);
+  const isHeader = (t: string, index: number): boolean => {
+    if (isSelfSpeaker(t) || knownSpeakers.has(t)) return true;
+    if (spoken?.has(t)) return repeats(t);
+    return index === 0 || repeats(t);
+  };
+  const remember = (line: string, speaker: string): void => {
+    if (!spoken || knownSpeakers.has(line)) return;
+    spoken.delete(line);
+    spoken.set(line, speaker);
+    if (spoken.size > MAX_SPOKEN_LINES) spoken.delete(spoken.keys().next().value as string);
+  };
 
   const blocks: CaptionBlock[] = [];
   texts.forEach((t, index) => {
     if (isHeader(t, index)) {
       blocks.push({ speaker: t, text: "", isSelf: isSelfSpeaker(t) });
-    } else {
-      const last = blocks[blocks.length - 1];
-      last.text = last.text ? `${last.text} ${t}` : t;
+      return;
     }
+    if (blocks.length === 0) {
+      // Only a remembered line gets here: the head of its turn scrolled out of Meet's history.
+      const speaker = spoken?.get(t) ?? t;
+      blocks.push({ speaker, text: "", isSelf: isSelfSpeaker(speaker) });
+    }
+    const last = blocks[blocks.length - 1];
+    last.text = last.text ? `${last.text} ${t}` : t;
+    remember(t, last.speaker);
   });
   return blocks;
 }
@@ -356,14 +407,23 @@ export interface CaptionReading {
   blocks: CaptionBlock[] | null;
 }
 
-/** One snapshot of the Meet tab -> its caption blocks. `known` gains every header seen. */
-export function readCaptions(root: UiaNode, known: Set<string> = new Set()): CaptionReading {
+/**
+ * One snapshot of the Meet tab -> its caption blocks. `known` gains every header seen, `spoken`
+ * every line read as speech (see `parseCaptionTexts`); a caller reading a stream passes the same
+ * two on every reading.
+ */
+export function readCaptions(
+  root: UiaNode,
+  known: Set<string> = new Set(),
+  spoken: SpokenLines = new Map(),
+): CaptionReading {
   const region = findCaptionsRegion(root);
   if (!region) return { blocks: null };
   const controls = findCallControls(root);
   const tiles = tileNames(root, [region, controls.ok ? controls.controls.group : null]);
-  const speakers = new Set([...known, ...tiles]);
-  const blocks = parseCaptionTexts(captionTexts(region), speakers);
+  // A tile that repeats words already spoken is not a participant.
+  const speakers = new Set([...known, ...[...tiles].filter((name) => !spoken.has(name))]);
+  const blocks = parseCaptionTexts(captionTexts(region), speakers, spoken);
   for (const b of blocks) known.add(b.speaker);
   return { blocks };
 }
@@ -771,6 +831,7 @@ export class MeetCaptionStream {
   private meetCode: string | null = null;
   private tracker: CaptionTracker | null = null;
   private known = new Set<string>();
+  private spoken: SpokenLines = new Map();
   private timer: unknown = null;
   private generation = 0;
   private lastStatusKey = "";
@@ -797,6 +858,7 @@ export class MeetCaptionStream {
       interimMs: this.options.interimMs ?? MEET_CAPTION_INTERIM_MS,
     });
     this.known = new Set();
+    this.spoken = new Map();
     this.resetPeriod(this.now());
     const generation = ++this.generation;
     this.schedule(generation, 0);
@@ -891,7 +953,7 @@ export class MeetCaptionStream {
       if (!snap.found) state = "unavailable_tab_inactive";
       else {
         if (snap.minimized) state = "unavailable_minimized";
-        blocks = readCaptions(snap.root, this.known).blocks;
+        blocks = readCaptions(snap.root, this.known, this.spoken).blocks;
         captionsVisible = blocks !== null;
       }
       this.period.reads++;
