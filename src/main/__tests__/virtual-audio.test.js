@@ -6,6 +6,7 @@ import {
   buildMacDriverInstallScript,
   describeMacVirtualAudio,
   describeWindowsVirtualAudioForEndpoints,
+  lastGoodEndpointNames,
   toAppleScriptAdminCommand,
   withHiFiCableFormat,
 } from "../virtual-audio.ts";
@@ -481,4 +482,28 @@ test("endpoint labels survive the Hi-Fi format read", async () => {
   }));
   assert.deepEqual(withFormats.endpointLabels, WINDOWS_LABELS);
   assert.equal(withFormats.hifiFormatMismatch, false);
+});
+
+test("an endpoint read that failed keeps the last list: a timeout is not 'VB-CABLE is missing' (23:06Z)", () => {
+  const answers = [[CABLE_OUTPUT, HIFI_OUTPUT], null, [], null];
+  const failed = [];
+  const names = lastGoodEndpointNames(() => answers.shift(), (kept) => failed.push(kept));
+  const installed = () =>
+    describeWindowsVirtualAudioForEndpoints(names(), SUPPORTED_BUILD, true).devices.some(
+      (device) => device.providerId === "vbcable-free" && device.installed,
+    );
+
+  assert.equal(installed(), true);
+  // PowerShell ran out of its 2.5 s: the loopback gate used to answer B2 driver-missing here.
+  assert.equal(installed(), true);
+  assert.deepEqual(failed, [2]);
+  // A read that worked and found nothing is an answer, and replaces what was remembered.
+  assert.equal(installed(), false);
+  assert.equal(installed(), false);
+  assert.deepEqual(failed, [2, 0]);
+});
+
+test("with no earlier read to go by, a failed endpoint read stays empty (fails closed)", () => {
+  const names = lastGoodEndpointNames(() => null);
+  assert.deepEqual(names(), []);
 });
