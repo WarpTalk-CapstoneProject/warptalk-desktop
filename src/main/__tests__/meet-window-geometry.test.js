@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { meetWindowHandleForArm, parseMeetWindowGeometry, sameMeetWindowGeometry } from "../meet-window-geometry.ts";
+import {
+  CALL_READ_FRESH_MS,
+  meetWindowForArm,
+  parseMeetWindowGeometry,
+  sameMeetWindowGeometry,
+} from "../meet-window-geometry.ts";
 
 /**
  * A normal (restored) Chrome window at (100, 50) on Windows 11, physical pixels: 7 px invisible
@@ -104,23 +109,84 @@ test("geometry: equality is by value, and absent equals absent only", () => {
   assert.equal(sameMeetWindowGeometry(a, hidden), false);
 });
 
-test("arm handle: the tab's window as the call state names it wins over the older sighting", () => {
-  // A Meet tab dragged out into a new window: the tracker already reads 5555, presence still 2222.
-  const call = { phase: "in-call", via: "tab", windowHandle: 5555 };
-  assert.equal(meetWindowHandleForArm({ sightingHandle: 2222, call }), 5555);
-  assert.equal(meetWindowHandleForArm({ sightingHandle: 2222, call: { ...call, phase: "unknown" } }), 5555);
-  assert.equal(meetWindowHandleForArm({ sightingHandle: 2222, call: { ...call, phase: "lobby" } }), 5555);
+test("geometry: content is checked against the VISIBLE window and always ends up inside frame", () => {
+  // A Document reaching into the invisible left/bottom resize borders (inside GetWindowRect, outside
+  // the visible frame) by more than rounding: dropped.
+  assert.equal(parseMeetWindowGeometry({ ...restored(), doc: [94, 166, 1386, 856] }), null);
+  // A pixel or two past the frame (fractional DPI rounding): clamped back in.
+  const rounded = parseMeetWindowGeometry({ ...restored(), doc: [99, 166, 1387, 851] });
+  assert.deepEqual(rounded.content, { x: 0, y: 116, width: 1286, height: 684 });
+  for (const raw of [restored(), { ...restored(), doc: [99, 166, 1387, 851] }]) {
+    const { frame, content } = parseMeetWindowGeometry(raw);
+    assert.ok(content.x >= 0 && content.y >= 0);
+    assert.ok(content.x + content.width <= frame.width && content.y + content.height <= frame.height);
+  }
 });
 
-test("arm handle: PiP, a left page, no handle or a bad one fall back to the sighting", () => {
-  const sightingHandle = 2222;
-  assert.equal(meetWindowHandleForArm({ sightingHandle, call: { phase: "in-call", via: "pip", windowHandle: 3333 } }), 2222);
-  assert.equal(meetWindowHandleForArm({ sightingHandle, call: { phase: "left", via: "tab", windowHandle: 5555 } }), 2222);
-  assert.equal(meetWindowHandleForArm({ sightingHandle, call: { phase: "unknown", via: null } }), 2222);
-  for (const windowHandle of [undefined, 0, -1, 1.5, Number.NaN]) {
-    assert.equal(meetWindowHandleForArm({ sightingHandle, call: { phase: "in-call", via: "tab", windowHandle } }), 2222);
+const NOW = 100_000;
+const presence = (windowHandle, via = "document") => ({ windowHandle, via });
+
+test("arm: a fresh in-call tab reading names the window, and the PiP gate agrees with it", () => {
+  // The Meet tab dragged into a new window: the tracker reads 5555, presence still 2222.
+  const call = { phase: "in-call", via: "tab", windowHandle: 5555 };
+  assert.deepEqual(meetWindowForArm({ sighting: presence(2222), call, callReadAtMs: NOW - 800, nowMs: NOW }), {
+    windowHandle: 5555,
+    inPictureInPicture: false,
+    source: "call-state",
+  });
+  // Dragged out of PiP back onto a tab: presence still says PiP, the fresh tracker says tab. Not refused.
+  assert.equal(
+    meetWindowForArm({ sighting: presence(3333, "pip"), call, callReadAtMs: NOW - 800, nowMs: NOW }).inPictureInPicture,
+    false,
+  );
+  // A fresh in-call PiP reading refuses, whatever presence says.
+  const inPip = meetWindowForArm({
+    sighting: presence(2222),
+    call: { phase: "in-call", via: "pip" },
+    callReadAtMs: NOW - 800,
+    nowMs: NOW,
+  });
+  assert.equal(inPip.inPictureInPicture, true);
+  assert.equal(inPip.source, "call-state");
+});
+
+test("arm: unknown, lobby, left or a stale tracker fall back to presence for both answers", () => {
+  const fresh = NOW - 800;
+  for (const call of [
+    { phase: "unknown", via: "tab", windowHandle: 5555 },
+    { phase: "lobby", via: "tab", windowHandle: 5555 },
+    { phase: "left", via: "tab", windowHandle: 5555 },
+    { phase: "unknown", via: null },
+    { phase: "in-call", via: "tab" },
+    { phase: "in-call", via: "tab", windowHandle: 0 },
+  ]) {
+    assert.deepEqual(
+      meetWindowForArm({ sighting: presence(2222), call, callReadAtMs: fresh, nowMs: NOW }),
+      { windowHandle: 2222, inPictureInPicture: false, source: "presence" },
+      JSON.stringify(call),
+    );
   }
-  assert.equal(meetWindowHandleForArm({ sightingHandle: null, call: { phase: "unknown", via: null } }), null);
+  // An in-call tab reading whose last read is too old, or that never read at all.
+  const call = { phase: "in-call", via: "tab", windowHandle: 5555 };
+  assert.equal(
+    meetWindowForArm({ sighting: presence(2222), call, callReadAtMs: NOW - CALL_READ_FRESH_MS - 1, nowMs: NOW }).windowHandle,
+    2222,
+  );
+  assert.equal(meetWindowForArm({ sighting: presence(2222), call, callReadAtMs: null, nowMs: NOW }).windowHandle, 2222);
+  // Presence on PiP refuses; so does a tracker that last said PiP, even a stale one (B18).
+  assert.equal(
+    meetWindowForArm({ sighting: presence(3333, "pip"), call: { phase: "unknown", via: null }, callReadAtMs: fresh, nowMs: NOW })
+      .inPictureInPicture,
+    true,
+  );
+  assert.equal(
+    meetWindowForArm({ sighting: presence(2222), call: { phase: "in-call", via: "pip" }, callReadAtMs: null, nowMs: NOW })
+      .inPictureInPicture,
+    true,
+  );
+  // No handle anywhere, or a bad one.
+  assert.equal(meetWindowForArm({ sighting: presence(null), call: { phase: "unknown", via: null }, callReadAtMs: null, nowMs: NOW }).windowHandle, null);
+  assert.equal(meetWindowForArm({ sighting: presence(-4), call: { phase: "unknown", via: null }, callReadAtMs: null, nowMs: NOW }).windowHandle, null);
 });
 
 test("geometry: PowerShell 5.1's wrapped-array shape is read like a plain array", () => {

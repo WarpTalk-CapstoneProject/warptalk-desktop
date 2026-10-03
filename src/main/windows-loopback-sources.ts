@@ -13,6 +13,7 @@ import { promisify } from "util";
 import type { DesktopCapturerSource } from "electron";
 
 import type { WindowsLoopbackSource } from "../shared/types.ts";
+import { isWindowHandle } from "./window-handle.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -74,7 +75,7 @@ export function parseDesktopSourceWindowHandle(sourceId: string): number | null 
   if (!match) return null;
 
   const handle = Number.parseInt(match[1], 10);
-  return Number.isSafeInteger(handle) && handle > 0 ? handle : null;
+  return isWindowHandle(handle) ? handle : null;
 }
 
 export function isLikelyMeetingWindow(name: string): boolean {
@@ -111,7 +112,7 @@ export async function readMainWindowHandleMap(
 
     const handle = Number.parseInt(match[1], 10);
     const processId = Number.parseInt(match[2], 10);
-    if (!Number.isSafeInteger(handle) || handle <= 0) continue;
+    if (!isWindowHandle(handle)) continue;
     if (!Number.isSafeInteger(processId) || processId <= 0) continue;
     handles.set(handle, processId);
   }

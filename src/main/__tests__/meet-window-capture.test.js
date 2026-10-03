@@ -208,3 +208,35 @@ test("watcher: remembers whether the last sighting was the PiP window, and forge
   watcher.disarm();
   assert.equal(watcher.meetWindowVia, null);
 });
+
+test("watcher: the tracker's 1 s read refreshes the window and the PiP flag, never visibility (#56 review)", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let sighting = { meetCode: "abc-defg-hij", processId: 4242, windowHandle: 3333, via: "pip" };
+  const observed = [];
+  const watcher = new MeetPresenceWatcher({
+    readMeetSighting: async () => sighting,
+    onChange: (presence) => observed.push(presence),
+    intervalMs: 3000,
+    now: () => 1000,
+  });
+  // Before the first sighting it is ignored.
+  watcher.noteWindow({ meetCode: "abc-defg-hij", processId: 4242, windowHandle: 9999, via: "document" });
+  assert.equal(watcher.meetWindowHandle, null);
+  watcher.arm();
+  await flush();
+  assert.equal(watcher.meetWindowVia, "pip");
+
+  // The Meet tab dragged out of PiP into its own window, seen by the state read between polls.
+  watcher.noteWindow({ meetCode: "abc-defg-hij", processId: 4242, windowHandle: 5555, via: "document" });
+  assert.equal(watcher.meetWindowHandle, 5555);
+  assert.equal(watcher.meetWindowVia, "document");
+  assert.equal(observed.length, 1, "no presence change is emitted for it");
+  // A read that saw no Meet says nothing about the window; visibility stays with the poll.
+  watcher.noteWindow(null);
+  assert.equal(watcher.meetWindowHandle, 5555);
+  assert.equal(watcher.meetWindowVisible, true);
+
+  watcher.disarm();
+  watcher.noteWindow({ meetCode: "abc-defg-hij", processId: 4242, windowHandle: 5555, via: "document" });
+  assert.equal(watcher.meetWindowHandle, null);
+});

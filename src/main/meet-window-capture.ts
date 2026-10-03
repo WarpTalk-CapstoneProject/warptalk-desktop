@@ -55,6 +55,7 @@
 
 import type { ArmMeetWindowCaptureResult } from "../shared/types.ts";
 import { parseDesktopSourceWindowHandle } from "./windows-loopback-sources.ts";
+import { isWindowHandle } from "./window-handle.ts";
 
 /** How long an arm waits for its getDisplayMedia. The web app calls it straight after arming. */
 export const MEET_WINDOW_CAPTURE_ARM_TTL_MS = 10_000;
@@ -112,7 +113,7 @@ export function resolveMeetWindowSource<S extends { id: string }>(
   // B18: the PiP window is never recorded, whatever its handle.
   if (sighting.inPictureInPicture === true) return { ok: false, reason: "meet-not-on-tab" };
   const handle = sighting.windowHandle;
-  if (typeof handle !== "number" || !Number.isSafeInteger(handle) || handle <= 0) {
+  if (!isWindowHandle(handle)) {
     return { ok: false, reason: "meet-window-not-found" };
   }
   const source = sources.find((candidate) => parseDesktopSourceWindowHandle(candidate.id) === handle);

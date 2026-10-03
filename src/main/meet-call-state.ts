@@ -64,6 +64,7 @@ import { MEET_CODE, childrenOf, type UiaNode } from "./meet-captions.ts";
 import type { MeetCallState, MeetSelfMic, MeetWindowGeometry } from "../shared/types.ts";
 import type { MeetSighting } from "./meet-url-sensor.ts";
 import { parseMeetWindowGeometry, sameMeetWindowGeometry } from "./meet-window-geometry.ts";
+import { isWindowHandle } from "./window-handle.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Evidence
@@ -131,7 +132,7 @@ export function parseMeetSurfaces(raw: unknown): MeetSurface[] {
       surface: kind,
       meetCode: code,
       processId: typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? pid : null,
-      ...(typeof hwnd === "number" && Number.isSafeInteger(hwnd) && hwnd > 0 ? { windowHandle: hwnd } : {}),
+      ...(isWindowHandle(hwnd) ? { windowHandle: hwnd } : {}),
       ...(geometry ? { geometry } : {}),
       minimized: item.minimized === true,
       truncated: item.truncated === true,
@@ -307,7 +308,11 @@ export interface MeetCallReading {
   meetCode: string | null;
   /** Why, in a fixed vocabulary - for logs and for the web side's diagnostics, not for display. */
   reason: string;
-  /** The window the surface was read from, when it named one. See `MeetCallState.windowHandle`. */
+  /**
+   * The browser window hosting the Meet TAB, when the surface named one. Tab readings only: the PiP
+   * window's HWND would change this on every tab/PiP switch, and the PiP window is never recorded.
+   * See `MeetCallState.windowHandle`.
+   */
   windowHandle?: number;
   /** Tab surfaces only. See `MeetCallState.windowGeometry`. */
   windowGeometry?: MeetWindowGeometry;
@@ -362,8 +367,9 @@ export function classifyMeetSurface(surface: MeetSurface): MeetCallClassificatio
     via: surface.surface,
     meetCode,
     reason,
-    // Present only when known, so a reading without them looks exactly as it did before.
-    ...(typeof windowHandle === "number" ? { windowHandle } : {}),
+    // Present only when known, so a reading without them looks exactly as it did before. Tab only:
+    // a PiP reading carries no window (sightingFromScan still takes the PiP HWND off the surface).
+    ...(surface.surface === "tab" && isWindowHandle(windowHandle) ? { windowHandle } : {}),
     ...(surface.surface === "tab" && surface.geometry ? { windowGeometry: surface.geometry } : {}),
   });
 
@@ -392,15 +398,33 @@ const PHASE_RANK: Record<MeetCallPhase, number> = { "in-call": 3, lobby: 2, left
  * "you left" tab of one meeting cannot hide the PiP window of the call the user is in now. Ties go
  * to the first surface, and a tab is listed before a PiP window of the same rank.
  *
+ * STICKY WINDOW (`preferWindowHandle`): windows are listed in Z-order, so with two Meet tabs in two
+ * windows in the same phase, merely focusing the other window would flip the answer's window - and
+ * the web app re-arms its recording capture on every window change. A tie therefore goes to the
+ * tab in the window already reported, while it is still a candidate of that rank.
+ *
  * No surface at all is `unknown`, never `left`: UIA only exposes a window's ACTIVE tab, so a Meet
  * tab the user switched away from (with auto picture-in-picture off) is invisible, not gone.
  */
-export function classifyMeetCall(surfaces: MeetSurface[]): MeetCallClassification {
+export function classifyMeetCall(
+  surfaces: MeetSurface[],
+  options: { preferWindowHandle?: number | null } = {},
+): MeetCallClassification {
   let best: MeetCallClassification | null = null;
+  const prefer = isWindowHandle(options.preferWindowHandle) ? options.preferWindowHandle : null;
   const ordered = [...surfaces].sort((a, b) => Number(a.surface === "pip") - Number(b.surface === "pip"));
   for (const surface of ordered) {
     const next = classifyMeetSurface(surface);
-    if (!best || PHASE_RANK[next.call.phase] > PHASE_RANK[best.call.phase]) best = next;
+    if (!best || PHASE_RANK[next.call.phase] > PHASE_RANK[best.call.phase]) {
+      best = next;
+    } else if (
+      prefer !== null &&
+      PHASE_RANK[next.call.phase] === PHASE_RANK[best.call.phase] &&
+      next.call.windowHandle === prefer &&
+      best.call.windowHandle !== prefer
+    ) {
+      best = next;
+    }
   }
   if (best) return best;
   return {
@@ -442,7 +466,7 @@ export function sightingFromScan(sighting: MeetSighting | null, surfaces: MeetSu
     return {
       meetCode: best.surface.meetCode,
       processId: best.surface.processId,
-      ...(typeof windowHandle === "number" ? { windowHandle } : {}),
+      ...(isWindowHandle(windowHandle) ? { windowHandle } : {}),
       via: best.surface.surface === "tab" ? "document" : "pip",
     };
   }
@@ -471,22 +495,14 @@ export function sightingFromScan(sighting: MeetSighting | null, surfaces: MeetSu
  * and leave the surface itself exactly as it was.
  */
 export const MEET_SURFACE_SCRIPT = String.raw`
-Add-Type @'
-using System;using System.Runtime.InteropServices;
-public class MeetGeom {
-  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
-  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c);
-  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
-}
-'@
+# The window-geometry P/Invokes live in the sensor script's MeetWin class (meet-url-sensor.ts): one
+# Add-Type, one C# compile, for the one helper process both scripts run in.
 # Per-monitor DPI aware (v2 = -4), so GetWindowRect, DWM and UI Automation all answer in physical
 # pixels, the unit of a captured frame. Refused when the host already chose (then the thread-level
 # call still applies) and absent before Windows 10 1607 (then the cross-check in
 # meet-window-geometry.ts drops a geometry whose spaces disagree).
-try { [void][MeetGeom]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) } catch {}
-try { [void][MeetGeom]::SetThreadDpiAwarenessContext([IntPtr]::new(-4)) } catch {}
+try { [void][MeetWin]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) } catch {}
+try { [void][MeetWin]::SetThreadDpiAwarenessContext([IntPtr]::new(-4)) } catch {}
 # DWMWA_EXTENDED_FRAME_BOUNDS: the visible window, without the invisible resize borders.
 $DWMWA_EXTENDED_FRAME_BOUNDS = 9
 $btnCond = New-Object System.Windows.Automation.PropertyCondition(
@@ -528,28 +544,30 @@ function ConvertTo-Ltrb($r) {
 
 # Where the page sits in its window, raw: GetWindowRect, DWM's visible frame, UI Automation's
 # window rectangle and the Document's. Null for a minimized window or when the basics fail.
-function Get-MeetGeometry($w, $doc) {
+# $el is the window's element as Read-Window already looked it up (null: not known, skipped).
+function Get-MeetGeometry($w, $doc, $el) {
   if ([MeetWin]::IsIconic($w.H)) { return $null }
-  try { [void][MeetGeom]::SetThreadDpiAwarenessContext([IntPtr]::new(-4)) } catch {}
-  $gr = New-Object MeetGeom+RECT
-  if (-not [MeetGeom]::GetWindowRect($w.H, [ref]$gr)) { return $null }
+  try { [void][MeetWin]::SetThreadDpiAwarenessContext([IntPtr]::new(-4)) } catch {}
+  $gr = New-Object MeetWin+RECT
+  if (-not [MeetWin]::GetWindowRect($w.H, [ref]$gr)) { return $null }
   $win = @($gr.Left, $gr.Top, $gr.Right, $gr.Bottom)
   $efb = $null
   try {
-    $er = New-Object MeetGeom+RECT
-    if ([MeetGeom]::DwmGetWindowAttribute($w.H, $DWMWA_EXTENDED_FRAME_BOUNDS, [ref]$er, 16) -eq 0) {
+    $er = New-Object MeetWin+RECT
+    if ([MeetWin]::DwmGetWindowAttribute($w.H, $DWMWA_EXTENDED_FRAME_BOUNDS, [ref]$er, 16) -eq 0) {
       $efb = @($er.Left, $er.Top, $er.Right, $er.Bottom)
     }
   } catch { $efb = $null }
   $uia = $null
-  try { $uia = ConvertTo-Ltrb ([System.Windows.Automation.AutomationElement]::FromHandle($w.H).Current.BoundingRectangle) } catch { $uia = $null }
+  if ($el -ne $null) { try { $uia = ConvertTo-Ltrb $el.Current.BoundingRectangle } catch { $uia = $null } }
   $docRect = ConvertTo-Ltrb $doc.Current.BoundingRectangle
   if ($docRect -eq $null) { return $null }
   return @{ win = $win; efb = $efb; uia = $uia; doc = $docRect }
 }
 
-# $doc and $value are the Document and its address as Read-Window just read them for this window.
-function Get-MeetSurface($w, $doc, $value) {
+# $doc and $value are the Document and its address as Read-Window just read them for this window,
+# $el the window's own element.
+function Get-MeetSurface($w, $doc, $value, $el) {
   if ($doc -eq $null) { return $null }
   $kind = $null
   $code = $null
@@ -571,7 +589,7 @@ function Get-MeetSurface($w, $doc, $value) {
   $buttons = Get-MeetButtons $doc
   # Tabs only: the PiP window is never recorded, so it is never cropped either.
   $geometry = $null
-  if ($kind -eq 'tab') { try { $geometry = Get-MeetGeometry $w $doc } catch { $geometry = $null } }
+  if ($kind -eq 'tab') { try { $geometry = Get-MeetGeometry $w $doc $el } catch { $geometry = $null } }
   return @{
     surface = $kind; meetCode = $code; processId = $w.Pid; windowHandle = $w.H.ToInt64()
     minimized = [bool][MeetWin]::IsIconic($w.H)
@@ -589,12 +607,13 @@ function Read-MeetScan($windows) {
   foreach ($w in $windows) {
     $script:doc = $null
     $script:docValue = ''
+    $script:el = $null
     $r = Read-Window $w
     # A normal window wins over a picture-in-picture one: it carries the room code. The pass no
     # longer stops at the first one, because a later window may hold the call itself.
     if ($r -ne $null -and ($hit -eq $null -or ($hit.via -ne 'document' -and $r.via -eq 'document'))) { $hit = $r }
     $s = $null
-    try { $s = Get-MeetSurface $w $script:doc $script:docValue } catch { $s = $null }
+    try { $s = Get-MeetSurface $w $script:doc $script:docValue $script:el } catch { $s = $null }
     if ($s -ne $null) { [void]$surfaces.Add($s); [void]$seen.Add($w) }
   }
   $script:surfaceWindows = $seen
@@ -661,6 +680,15 @@ const DEFAULT_CONFIRM_MS = 1500;
 const CONFIRM_READS: Record<MeetCallPhase, number> = { "in-call": 1, lobby: 1, left: 2, unknown: 2 };
 
 /**
+ * How many consecutive tab readings of the same window may come back without a layout before the
+ * last good one is let go. A single geometry read that failed its checks (a UI Automation call
+ * caught mid-update, a DWM call that failed) must not turn the recording's crop off for a second
+ * and show the tab strip; a layout that stays unreadable for this many reads (~3 s) is dropped.
+ * A different window, or a minimized one, drops it at once.
+ */
+export const GEOMETRY_HOLD_READS = 3;
+
+/**
  * The window and its layout count as a change: a Meet tab dragged into a new window, or the
  * bookmarks bar toggled, must reach the web app while the phase stays `in-call` (WT-910).
  */
@@ -689,6 +717,9 @@ export class MeetCallStateTracker {
   private polling = false;
   private timer: unknown = null;
   private generation = 0;
+  /** The last good layout of the tab's window, and how many readings since have lacked one. */
+  private heldGeometry: { windowHandle: number; geometry: MeetWindowGeometry; misses: number } | null = null;
+  private lastReadMs: number | null = null;
   private readonly options: MeetCallStateTrackerOptions;
   private readonly now: () => number;
 
@@ -714,6 +745,14 @@ export class MeetCallStateTracker {
     return this.polling;
   }
 
+  /**
+   * Date.now() of the last read that came back (from either cadence), or null. The committed state
+   * only changes when a reading differs, so this - not `callState.atMs` - is how fresh it is.
+   */
+  get lastReadAtMs(): number | null {
+    return this.lastReadMs;
+  }
+
   /** Starts or stops the fast loop. Idempotent. Stopping it forgets nothing. */
   setPolling(on: boolean): void {
     if (!this.options.probe || on === this.polling) return;
@@ -733,13 +772,37 @@ export class MeetCallStateTracker {
     this.cancelTimer();
     if (!this.options.probe) return;
     this.candidate = null;
+    this.heldGeometry = null;
+    this.lastReadMs = null;
     this.commit({ phase: "unknown", via: null, meetCode: null, reason }, NO_MIC);
   }
 
   /** One look's worth of surfaces, from either cadence. */
   ingest(surfaces: MeetSurface[]): void {
-    const { call, mic } = classifyMeetCall(surfaces);
-    this.observe(call, mic);
+    this.lastReadMs = this.now();
+    const { call, mic, surface } = classifyMeetCall(surfaces, { preferWindowHandle: this.call.windowHandle });
+    this.observe(this.withHeldGeometry(call, surface), mic);
+  }
+
+  /** See GEOMETRY_HOLD_READS. Readings that are not of a tab neither use nor change the hold. */
+  private withHeldGeometry(call: MeetCallReading, surface: MeetSurface | null): MeetCallReading {
+    const windowHandle = call.windowHandle;
+    if (call.via !== "tab" || !isWindowHandle(windowHandle)) return call;
+    if (surface?.minimized) {
+      this.heldGeometry = null;
+      return call;
+    }
+    if (call.windowGeometry) {
+      this.heldGeometry = { windowHandle, geometry: call.windowGeometry, misses: 0 };
+      return call;
+    }
+    const held = this.heldGeometry;
+    if (held && held.windowHandle === windowHandle && held.misses < GEOMETRY_HOLD_READS) {
+      held.misses += 1;
+      return { ...call, windowGeometry: held.geometry };
+    }
+    this.heldGeometry = null;
+    return call;
   }
 
   /** A look that failed. Counted as "cannot see", which needs confirming like any other. */

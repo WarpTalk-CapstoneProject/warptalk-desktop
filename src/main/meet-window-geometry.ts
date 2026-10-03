@@ -35,6 +35,7 @@
  */
 
 import type { MeetCallState, MeetWindowGeometry, MeetWindowRect } from "../shared/types.ts";
+import { isWindowHandle } from "./window-handle.ts";
 
 interface Ltrb {
   l: number;
@@ -50,7 +51,7 @@ const MINIMIZED_PARKING = -30_000;
 /** A visible Meet window is never smaller than this; anything smaller is not worth cropping. */
 const MIN_FRAME_WIDTH = 200;
 const MIN_FRAME_HEIGHT = 150;
-/** How far the Document may poke past the window rectangle (rounding of a fractional DPI). */
+/** How far the Document may poke past the visible window (rounding of a fractional DPI). */
 const CONTENT_TOLERANCE_PX = 2;
 /**
  * How far UI Automation's window size may differ from GetWindowRect's or DWM's. A DPI mismatch at
@@ -99,7 +100,7 @@ function relativeTo(origin: Ltrb, rect: Ltrb): MeetWindowRect {
  * Raw shape (screen pixels, `[left, top, right, bottom]`): `win` GetWindowRect, `efb` DWM extended
  * frame bounds (may be null: DWM off or the call failed, then `win` stands in), `uia` UI Automation's
  * rectangle for the window (may be null), `doc` the Document element. Null for anything malformed,
- * a minimized window, coordinate spaces that disagree, or a Document outside its window.
+ * a minimized window, coordinate spaces that disagree, or a Document outside the visible window.
  */
 export function parseMeetWindowGeometry(raw: unknown): MeetWindowGeometry | null {
   if (!raw || typeof raw !== "object") return null;
@@ -114,12 +115,21 @@ export function parseMeetWindowGeometry(raw: unknown): MeetWindowGeometry | null
   if (!inside(efb, win, 1)) return null;
   const uia = ltrb(item.uia);
   if (uia && !sameSize(uia, win, SPACE_TOLERANCE_PX) && !sameSize(uia, efb, SPACE_TOLERANCE_PX)) return null;
-  if (!inside(doc, win, CONTENT_TOLERANCE_PX)) return null;
+  // Against the VISIBLE window, not GetWindowRect: the page can never be in the invisible resize
+  // borders, and the web side crops within `frame`. A pixel or two past it (fractional DPI
+  // rounding) is clamped back in, so `content` is always inside `frame`.
+  if (!inside(doc, efb, CONTENT_TOLERANCE_PX)) return null;
   if (efb.r - efb.l < MIN_FRAME_WIDTH || efb.b - efb.t < MIN_FRAME_HEIGHT) return null;
+  const content: Ltrb = {
+    l: Math.max(doc.l, efb.l),
+    t: Math.max(doc.t, efb.t),
+    r: Math.min(doc.r, efb.r),
+    b: Math.min(doc.b, efb.b),
+  };
   return {
     frame: relativeTo(efb, efb),
     window: relativeTo(efb, win),
-    content: relativeTo(efb, doc),
+    content: relativeTo(efb, content),
   };
 }
 
@@ -136,26 +146,50 @@ export function sameMeetWindowGeometry(
   return sameRect(a.frame, b.frame) && sameRect(a.window, b.window) && sameRect(a.content, b.content);
 }
 
-function validHandle(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+/** How recent the call-state tracker's last successful read must be for an arm to lean on it. */
+export const CALL_READ_FRESH_MS = 5_000;
+
+export interface MeetWindowForArm {
+  /** The window to capture; null when nobody named one. */
+  windowHandle: number | null;
+  /** Meet is in Chrome's picture-in-picture window: the arm is refused (B18). */
+  inPictureInPicture: boolean;
+  /** Which source answered, for the log line. */
+  source: "call-state" | "presence";
 }
 
 /**
- * Which window an arm should capture: the window the call-state tracker last read the Meet TAB
- * from, when it has one, and otherwise the presence sighting's window as before.
+ * Which window an arm captures, and whether Meet is in PiP — both from ONE source, so the HWND and
+ * the PiP gate can never disagree about which read they came from.
  *
- * Why the tracker first: a Meet tab dragged into a new browser window moves the call to a new HWND.
- * The tracker reads every second, presence every three, so right after the drag presence still
- * names the old window — which now shows whatever tab is left in it. The web app re-arms as soon as
- * it sees the new HWND in the call state; answering that arm with the old window would record the
- * wrong one. A PiP reading is not used: the PiP window is never recorded (B18), and the arm refuses
- * it before this is asked.
+ *   call-state  the tracker's committed reading is `in-call` and its last successful read is at
+ *               most CALL_READ_FRESH_MS old. On the tab, with a handle: that window, not PiP. In
+ *               PiP: refused. The tracker reads every second; right after the Meet tab is dragged
+ *               into a new window — or out of PiP back onto a tab — it already names the new state
+ *               while presence (every 3 s) may still name the old one.
+ *   presence    anything else (lobby, `unknown`, a stale tracker, no handle): the presence sighting,
+ *               which the tracker's own reads also refresh (MeetPresenceWatcher.noteWindow). A
+ *               tracker that last said PiP still refuses: B18 never records the PiP window, and a
+ *               stale "not PiP" is not evidence enough to override it.
  */
-export function meetWindowHandleForArm(input: {
-  sightingHandle: number | null;
+export function meetWindowForArm(input: {
+  sighting: { windowHandle: number | null; via: "document" | "pip" | null };
   call: Pick<MeetCallState, "phase" | "via" | "windowHandle">;
-}): number | null {
-  const { call } = input;
-  if (call.via === "tab" && call.phase !== "left" && validHandle(call.windowHandle)) return call.windowHandle;
-  return input.sightingHandle;
+  /** Date.now() of the tracker's last successful read; null when it has none. */
+  callReadAtMs: number | null;
+  nowMs: number;
+}): MeetWindowForArm {
+  const { sighting, call } = input;
+  const fresh = input.callReadAtMs !== null && input.nowMs - input.callReadAtMs <= CALL_READ_FRESH_MS;
+  if (fresh && call.phase === "in-call") {
+    if (call.via === "pip") return { windowHandle: sighting.windowHandle, inPictureInPicture: true, source: "call-state" };
+    if (call.via === "tab" && isWindowHandle(call.windowHandle)) {
+      return { windowHandle: call.windowHandle, inPictureInPicture: false, source: "call-state" };
+    }
+  }
+  return {
+    windowHandle: isWindowHandle(sighting.windowHandle) ? sighting.windowHandle : null,
+    inPictureInPicture: sighting.via === "pip" || call.via === "pip",
+    source: "presence",
+  };
 }
