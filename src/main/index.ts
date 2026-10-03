@@ -339,7 +339,11 @@ const meetMicStream = new MeetMicStateStream({
   // Our own tree is excluded by ancestry anyway; the metrics list also covers any helper Electron
   // reparented.
   excludePids: () => [process.pid, ...app.getAppMetrics().map((metric) => metric.pid)],
-  emit: (state) => sendMeetMicState(state),
+  emit: (state) => {
+    // Emitted only on a change. Device names and states only - nothing the user said.
+    mainLog?.info("meet", "mic state", state);
+    sendMeetMicState(state);
+  },
 });
 
 function sendMeetMicState(state: MeetMicState, only?: Electron.WebContents): void {

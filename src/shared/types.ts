@@ -405,6 +405,16 @@ export interface EnsureMeetCaptionsResult {
  *   real       active session(s) on physical microphones only
  *   ambiguous  active sessions on the cable AND on another endpoint
  *   unknown    no active session (Meet not capturing, possibly muted), or the probe failed
+ *
+ * `speaker` answers the same question for the browser's OUTPUT, from render endpoints (optional,
+ * absent on desktop builds that predate it and when the probe failed):
+ *   cable      an active browser session plays into "CABLE Input (VB-Audio Virtual Cable)" - alone
+ *              or beside another device. Meet's far side then comes back out of "CABLE Output"
+ *              (Meet's microphone in a voice bridge) and the user hears nothing of the call.
+ *              "Hi-Fi Cable Input" never counts as this.
+ *   real       active session(s) on physical speakers only
+ *   unknown    nothing playing (Chrome may stop its output in a silent call), only another virtual
+ *              device, or the render side could not be read
  */
 export interface MeetMicState {
   state: "cable" | "real" | "unknown" | "ambiguous";
@@ -419,6 +429,10 @@ export interface MeetMicState {
     | "other-virtual-device"
     | "probe-failed"
     | "unsupported-platform";
+  /** Where the browser plays to; see above. Optional and additive. */
+  speaker?: "cable" | "real" | "unknown";
+  /** Every render endpoint with an active browser session, for diagnostics. */
+  speakerEndpoints?: string[];
   /** Date.now() of the read. */
   at: number;
 }
