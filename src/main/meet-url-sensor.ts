@@ -290,6 +290,17 @@ export class MeetUrlSensor {
     return child;
   }
 
+  private windowPreference: (() => number | null) | null = null;
+
+  /**
+   * Where the call-state tracker's tie between two Meet windows goes
+   * (MeetCallStateTracker.windowPreference). The sighting is classified with the same preference,
+   * so presence and the call state cannot name different windows.
+   */
+  setWindowPreference(preference: (() => number | null) | null): void {
+    this.windowPreference = preference;
+  }
+
   /**
    * One look. Resolves to the sighting, or throws so the watcher keeps its last observation.
    *
@@ -345,7 +356,10 @@ export class MeetUrlSensor {
     const surfaces = parseMeetSurfaces(parsed.surfaces);
     // A surface that is in a call is a sighting even where the URL read found none: Chrome's
     // picture-in-picture window. See sightingFromScan for what this does and does not change.
-    return { sighting: sightingFromScan(parsed.sighting ?? null, surfaces), surfaces };
+    return {
+      sighting: sightingFromScan(parsed.sighting ?? null, surfaces, { preferWindowHandle: this.windowPreference?.() ?? null }),
+      surfaces,
+    };
   }
 
   stop(): void {

@@ -453,10 +453,12 @@ export interface MeetCallState {
   /** Date.now() in main when this state was established. */
   atMs: number;
   /**
-   * The top-level HWND of the window the answer was read from (the browser window that hosts the
-   * Meet tab, or the PiP window), as a decimal number. A Meet tab dragged into a new browser window
-   * changes it, and the web app re-arms its recording capture on the new one (WT-910). Absent when
-   * the surface had no handle, from older builds, and with `via: null`.
+   * The top-level HWND of the browser window that hosts the Meet TAB, as a decimal number. Tab
+   * readings only (`via: "tab"`): absent while Meet is in picture-in-picture (`via: "pip"`; the PiP
+   * window is never recorded, and its HWND would change this on every tab/PiP switch) and with
+   * `via: null` (`unknown` without a surface), as well as when the surface had no handle and from
+   * older builds. A Meet tab dragged into a new browser window changes it, and the web app re-arms
+   * its recording capture on the new one (WT-910).
    */
   windowHandle?: number;
   /**
