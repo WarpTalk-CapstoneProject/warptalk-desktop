@@ -52,8 +52,10 @@
  *   on 2026-10-03 (desktop 0.4.11) a read with no recognisable toolbar - a network blip that also
  *   dropped the WarpTalk LiveKit connection, a tree caught mid-rebuild, a tree holding only an
  *   extension's buttons - was called `left` ("no-call-controls"), and the bridge room stopped its
- *   capture while the user was still in the call. A Meet tab that is really gone is not this
- *   module's to say: the address leaves the screen and presence (meet-presence.ts) reports it.
+ *   capture while the user was still in the call. A Meet tab that is really gone is not read from
+ *   the page either: on 2026-10-03 a CLOSED tab only ever read `unknown / no-meet-surface` and the
+ *   room was never ended. That case is now told apart by the browser's own tab strip (positive
+ *   evidence again, never mere absence): see meet-tab-identity.ts and the tracker's `ingest`.
  *
  * HARDENED AFTER A FIELD LOG (2026-10-03, desktop 0.4.11, vi UI): the self-mic answer flapped
  *   muted/unmuted/muted within 2.2 s and was applied to the WarpTalk mic each time. Since then:
@@ -82,6 +84,16 @@ import type { MeetCallState, MeetSelfMic, MeetWindowGeometry } from "../shared/t
 import type { MeetSighting } from "./meet-url-sensor.ts";
 import { parseMeetWindowGeometry, sameMeetWindowGeometry } from "./meet-window-geometry.ts";
 import { isWindowHandle } from "./window-handle.ts";
+import {
+  MeetTabWatch,
+  isMeetTabGoneReason,
+  parseMeetTabRef,
+  type MeetTabCheck,
+  type MeetTabIdentity,
+  type MeetTabRef,
+  type MeetTabVerdict,
+  type MeetTabWatchEntry,
+} from "./meet-tab-identity.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Evidence
@@ -118,6 +130,12 @@ export interface MeetSurface {
   minimized?: boolean;
   /** The listing hit the helper's cap; a control past it may be missing. */
   truncated?: boolean;
+  /**
+   * The window's selected TabItem when this tab surface was read (tab surfaces only): what lets a
+   * closed Meet tab be told from a background one later. Absent when the tab strip could not be
+   * read, and from older helper payloads. See meet-tab-identity.ts.
+   */
+  tab?: MeetTabRef;
   /** Every Button under the document, in document order. */
   buttons: MeetButton[];
 }
@@ -145,12 +163,14 @@ export function parseMeetSurfaces(raw: unknown): MeetSurface[] {
     }
     // Only a tab is ever cropped: the PiP window is never recorded (B18).
     const geometry = kind === "tab" ? parseMeetWindowGeometry(item.geometry) : null;
+    const tab = kind === "tab" ? parseMeetTabRef(item.tab) : null;
     out.push({
       surface: kind,
       meetCode: code,
       processId: typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? pid : null,
       ...(isWindowHandle(hwnd) ? { windowHandle: hwnd } : {}),
       ...(geometry ? { geometry } : {}),
+      ...(tab ? { tab } : {}),
       minimized: item.minimized === true,
       truncated: item.truncated === true,
       buttons,
@@ -564,7 +584,9 @@ const PHASE_RANK: Record<MeetCallPhase, number> = { "in-call": 3, lobby: 2, left
  * tab in the window already reported, while it is still a candidate of that rank.
  *
  * No surface at all is `unknown`, never `left`: UIA only exposes a window's ACTIVE tab, so a Meet
- * tab the user switched away from (with auto picture-in-picture off) is invisible, not gone.
+ * tab the user switched away from (with auto picture-in-picture off) is invisible, not gone. (The
+ * tracker may still turn such a read into `left` when the tab strip proves the tab gone; that is
+ * decided there, from evidence this function never sees - meet-tab-identity.ts.)
  */
 export function classifyMeetCall(
   surfaces: MeetSurface[],
@@ -788,17 +810,24 @@ function Get-MeetSurface($w, $doc, $value, $el) {
   # Tabs only: the PiP window is never recorded, so it is never cropped either.
   $geometry = $null
   if ($kind -eq 'tab') { try { $geometry = Get-MeetGeometry $w $doc $el } catch { $geometry = $null } }
+  # Tabs only: which TabItem is selected in this window now, so a closed tab can later be told from
+  # a background one (meet-tab-identity.ts). Fenced off like the geometry.
+  $tab = $null
+  if ($kind -eq 'tab') { try { $tab = Get-SelectedTab $w $el } catch { $tab = $null } }
   return @{
     surface = $kind; meetCode = $code; processId = $w.Pid; windowHandle = $w.H.ToInt64()
     minimized = [bool][MeetWin]::IsIconic($w.H)
     truncated = [bool]$buttons.truncated
     buttons = $buttons.list
     geometry = $geometry
+    tab = $tab
   }
 }
 
 # One pass over the given windows: the URL sighting exactly as before, plus every Meet surface.
-function Read-MeetScan($windows) {
+# $full says the windows were every browser window (Get-BrowserWindows), not only the last ones
+# Meet was in: only a full pass can say a Meet tab is nowhere (meet-tab-identity.ts).
+function Read-MeetScan($windows, $full) {
   $hit = $null
   $surfaces = New-Object System.Collections.ArrayList
   $seen = New-Object System.Collections.ArrayList
@@ -815,7 +844,7 @@ function Read-MeetScan($windows) {
     if ($s -ne $null) { [void]$surfaces.Add($s); [void]$seen.Add($w) }
   }
   $script:surfaceWindows = $seen
-  return @{ ok = $true; sighting = $hit; surfaces = $surfaces }
+  return @{ ok = $true; sighting = $hit; surfaces = $surfaces; full = [bool]$full }
 }
 
 # 'state': re-read only the windows Meet was last found in. Any trouble, or Meet no longer there
@@ -824,11 +853,11 @@ function Read-MeetScan($windows) {
 function Read-MeetState {
   if ($script:surfaceWindows.Count -gt 0) {
     try {
-      $r = Read-MeetScan @($script:surfaceWindows)
+      $r = Read-MeetScan @($script:surfaceWindows) $false
       if ($r.surfaces.Count -gt 0) { return $r }
     } catch {}
   }
-  return (Read-MeetScan (Get-BrowserWindows))
+  return (Read-MeetScan (Get-BrowserWindows) $true)
 }
 `;
 
@@ -836,13 +865,29 @@ function Read-MeetState {
 // The tracker
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * One look, as the tracker takes it: the surfaces, plus what the helper found about the Meet tabs
+ * the tracker remembers (meet-tab-identity.ts). A bare array is the older shape: no tab evidence.
+ */
+export interface MeetTrackerRead {
+  surfaces: MeetSurface[];
+  /** The look enumerated every browser window. Only then can a tab be called gone. */
+  full?: boolean;
+  tabChecks?: MeetTabCheck[];
+}
+
+/** For main.log: a Meet tab remembered, or what the remembered tabs added up to. */
+export type MeetTabEvent =
+  | { kind: "identity"; identity: MeetTabIdentity }
+  | ({ kind: "verdict" } & MeetTabVerdict);
+
 export interface MeetCallStateTrackerOptions {
   /**
    * The fast read ("state"), for the loop this tracker runs while Meet is in sight. Rejects for
    * "could not look". Null where there is no such read (macOS, Linux): the tracker then only ever
    * reports `unknown`.
    */
-  probe: (() => Promise<MeetSurface[]>) | null;
+  probe: (() => Promise<MeetSurface[] | MeetTrackerRead>) | null;
   /** Called only when the call state changed. */
   emitCallState: (state: MeetCallState) => void;
   /**
@@ -863,6 +908,10 @@ export interface MeetCallStateTrackerOptions {
   intervalMs?: number;
   /** How long a move to `left` / `unknown` must hold, on top of two consecutive reads. */
   confirmMs?: number;
+  /** How long a `left` read from the tab strip (tab closed) must hold, over two full looks. */
+  tabConfirmMs?: number;
+  /** main.log: a Meet tab remembered, and each change of what a surface-less read decided. */
+  onTabEvent?: (event: MeetTabEvent) => void;
   setTimer?: (callback: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
 }
@@ -917,6 +966,14 @@ export interface MeetSelfMicRead extends Partial<MeetSelfMicEvidence> {
 const CONFIRM_READS: Record<MeetCallPhase, number> = { "in-call": 1, lobby: 1, left: 2, unknown: 2 };
 
 /**
+ * A `left` because the Meet tab is gone (meet-tab-identity.ts) is believed only after it was seen
+ * by two FULL looks (every browser window enumerated) at least this far apart - on top of the
+ * usual two reads. A tab being dragged to another window, or a window being re-created, must not
+ * end a room; with the 3 s presence look this makes about 3-6 s from the close to the verdict.
+ */
+export const DEFAULT_TAB_CONFIRM_MS = 3000;
+
+/**
  * How long after the last good layout of the tab's window a tab reading of the same window that
  * came back without one still carries it. A single geometry read that failed its checks (a UI
  * Automation call caught mid-update, a DWM call that failed) must not turn the recording's crop off
@@ -955,7 +1012,25 @@ function sameCall(a: MeetCallState, b: MeetCallReading): boolean {
 export class MeetCallStateTracker {
   private call: MeetCallState;
   private mic: MeetSelfMic;
-  private candidate: { phase: MeetCallPhase; reads: number; sinceMs: number } | null = null;
+  private candidate: {
+    phase: MeetCallPhase;
+    reads: number;
+    sinceMs: number;
+    /** Full looks that read the Meet tab as gone, and when the first of them came. */
+    tabReads: number;
+    tabSinceMs: number | null;
+  } | null = null;
+  /** The Meet tabs remembered, to tell a closed tab from a background one. */
+  private readonly tabs = new MeetTabWatch();
+  /** The meeting whose tabs are watched: the code of the last read that showed a Meet surface. */
+  private watchCode: string | null = null;
+  /**
+   * The `left` committed because the Meet tab is gone. While no Meet surface is seen again it IS
+   * the answer to every surface-less (or failed) read: otherwise the next `no-meet-surface` would
+   * turn it back into `unknown`, and the tabs it was judged from are no longer there to judge.
+   */
+  private closedVerdict: MeetCallReading | null = null;
+  private lastTabVerdictKey = "";
   /** A changed mute waiting to hold (see DEFAULT_MIC_HOLD_MS). */
   private micCandidate: { muted: boolean; meetCode: string | null; sinceMs: number } | null = null;
   private lastReadKey = "";
@@ -1025,6 +1100,15 @@ export class MeetCallStateTracker {
     return this.lastTabWindowHandle;
   }
 
+  /**
+   * The remembered Meet tabs the helper should look up again on the next read (meet-url-sensor.ts
+   * sends them with the command). Empty once the verdict is in, and when nothing is remembered.
+   */
+  get tabWatchList(): MeetTabWatchEntry[] {
+    if (this.closedVerdict) return [];
+    return this.tabs.watchList(this.watchCode);
+  }
+
   /** Starts or stops the fast loop. Idempotent. Stopping it forgets nothing. */
   setPolling(on: boolean): void {
     if (!this.options.probe || on === this.polling) return;
@@ -1047,22 +1131,69 @@ export class MeetCallStateTracker {
     this.heldGeometry = null;
     this.latest = null;
     this.lastTabWindowHandle = null;
+    this.tabs.forget();
+    this.watchCode = null;
+    this.closedVerdict = null;
+    this.lastTabVerdictKey = "";
     this.commit({ phase: "unknown", via: null, meetCode: null, reason }, NO_MIC);
   }
 
-  /** One look's worth of surfaces, from either cadence. */
-  ingest(surfaces: MeetSurface[]): void {
+  /**
+   * One look's worth of surfaces, from either cadence. `read` carries the tab evidence of the look
+   * (meet-tab-identity.ts); without it a read with no Meet surface stays `unknown` as before.
+   */
+  ingest(surfaces: MeetSurface[], read: Omit<MeetTrackerRead, "surfaces"> = {}): void {
     const atMs = this.now();
-    const { call, mic, surface, micEvidence } = classifyMeetCall(surfaces, {
+    const classified = classifyMeetCall(surfaces, {
       preferWindowHandle: this.lastTabWindowHandle,
     });
+    const { mic, surface, micEvidence } = classified;
+    let call = classified.call;
+    let tabGone = false;
+
+    const sightings = surfaces
+      .filter((s) => s.surface === "tab")
+      .map((s) => ({ meetCode: s.meetCode, windowHandle: s.windowHandle, processId: s.processId, tab: s.tab }));
+    for (const identity of this.tabs.record(sightings, atMs)) {
+      this.options.onTabEvent?.({ kind: "identity", identity });
+    }
+
+    if (call.via !== null) {
+      // Meet is in sight again (this call or another): whatever was decided without it is over.
+      this.watchCode = call.meetCode;
+      this.closedVerdict = null;
+      this.lastTabVerdictKey = "";
+    } else if (this.closedVerdict) {
+      call = this.closedVerdict;
+    } else {
+      const verdict = this.tabs.judge(this.watchCode, read.tabChecks ?? [], read.full === true);
+      if (verdict) {
+        this.reportTabVerdict(verdict);
+        if (verdict.left) {
+          // The meeting's code goes with it: the web app trusts a code-less reading for any room.
+          call = { phase: "left", via: "tab", meetCode: verdict.meetCode, reason: verdict.reason };
+          tabGone = true;
+        } else {
+          // Still `unknown`, still code-less, exactly as before - only the reason says more.
+          call = { ...call, reason: verdict.reason };
+        }
+      }
+    }
+
     this.latest = {
       phase: call.phase,
       via: call.via,
       ...(isWindowHandle(call.windowHandle) ? { windowHandle: call.windowHandle } : {}),
       atMs,
     };
-    this.observe(this.withHeldGeometry(call, surface, atMs), mic, micEvidence);
+    this.observe(this.withHeldGeometry(call, surface, atMs), mic, micEvidence, tabGone);
+  }
+
+  private reportTabVerdict(verdict: MeetTabVerdict): void {
+    const key = JSON.stringify([verdict.meetCode, verdict.left, verdict.reason, verdict.tabs]);
+    if (key === this.lastTabVerdictKey) return;
+    this.lastTabVerdictKey = key;
+    this.options.onTabEvent?.({ kind: "verdict", ...verdict });
   }
 
   /**
@@ -1090,21 +1221,23 @@ export class MeetCallStateTracker {
 
   /** A look that failed. Counted as "cannot see", which needs confirming like any other. */
   ingestFailure(): void {
-    this.observe({ phase: "unknown", via: null, meetCode: null, reason: "probe-failed" }, NO_MIC);
+    // A failed read is not a surface seen again: a tab-closed verdict stands through it.
+    this.observe(this.closedVerdict ?? { phase: "unknown", via: null, meetCode: null, reason: "probe-failed" }, NO_MIC);
   }
 
   /** Exposed for tests; the timer calls it. */
   async tick(generation = this.generation): Promise<void> {
     const probe = this.options.probe;
     if (!probe || !this.polling || generation !== this.generation) return;
-    let surfaces: MeetSurface[] | null = null;
+    let result: MeetSurface[] | MeetTrackerRead | null = null;
     try {
-      surfaces = await probe();
+      result = await probe();
     } catch {
-      surfaces = null;
+      result = null;
     }
     if (!this.polling || generation !== this.generation) return;
-    if (surfaces) this.ingest(surfaces);
+    if (Array.isArray(result)) this.ingest(result);
+    else if (result) this.ingest(result.surfaces, { full: result.full, tabChecks: result.tabChecks });
     else this.ingestFailure();
     const setTimer = this.options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
     this.timer = setTimer(() => void this.tick(generation), this.options.intervalMs ?? DEFAULT_INTERVAL_MS);
@@ -1117,7 +1250,8 @@ export class MeetCallStateTracker {
     this.timer = null;
   }
 
-  private observe(call: MeetCallReading, mic: MeetSelfMicReading, evidence?: MeetSelfMicEvidence): void {
+  /** `tabGone`: this reading is a `left` because the Meet tab is gone, read by a full look. */
+  private observe(call: MeetCallReading, mic: MeetSelfMicReading, evidence?: MeetSelfMicEvidence, tabGone = false): void {
     if (call.phase === this.call.phase) {
       // Same phase: details (tab -> pip) apply at once; the mic goes through its own hold.
       this.candidate = null;
@@ -1126,13 +1260,23 @@ export class MeetCallStateTracker {
     }
     const now = this.now();
     if (!this.candidate || this.candidate.phase !== call.phase) {
-      this.candidate = { phase: call.phase, reads: 1, sinceMs: now };
+      this.candidate = { phase: call.phase, reads: 1, sinceMs: now, tabReads: 0, tabSinceMs: null };
     } else {
       this.candidate.reads += 1;
     }
+    if (tabGone) {
+      this.candidate.tabReads += 1;
+      if (this.candidate.tabSinceMs === null) this.candidate.tabSinceMs = now;
+    }
     const needed = CONFIRM_READS[call.phase];
     const held = now - this.candidate.sinceMs >= (this.options.confirmMs ?? DEFAULT_CONFIRM_MS);
-    if (needed > 1 && (this.candidate.reads < needed || !held)) {
+    // A tab-gone `left` also needs a second full look, DEFAULT_TAB_CONFIRM_MS after the first.
+    const tabHeld =
+      !tabGone ||
+      (this.candidate.tabReads >= 2 &&
+        this.candidate.tabSinceMs !== null &&
+        now - this.candidate.tabSinceMs >= (this.options.tabConfirmMs ?? DEFAULT_TAB_CONFIRM_MS));
+    if ((needed > 1 && (this.candidate.reads < needed || !held)) || !tabHeld) {
       // Not the call read before, and not yet believed either: a pending mute did not hold here.
       this.micCandidate = null;
       return;
@@ -1152,6 +1296,11 @@ export class MeetCallStateTracker {
     if (!sameCall(this.call, call)) {
       this.call = { ...call, atMs };
       this.options.emitCallState(this.call);
+    }
+    if (call.phase === "left" && call.via === "tab" && isMeetTabGoneReason(call.reason) && call.meetCode) {
+      // Said once, and kept (see closedVerdict). The tabs it was judged from are done with.
+      this.closedVerdict = call;
+      this.tabs.forget(call.meetCode);
     }
 
     const last = this.mic;

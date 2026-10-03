@@ -45,6 +45,13 @@ import {
   sightingFromScan,
   type MeetSurface,
 } from "./meet-call-state.ts";
+import {
+  MEET_TAB_SCRIPT,
+  formatMeetTabWatch,
+  parseMeetTabChecks,
+  type MeetTabCheck,
+  type MeetTabWatchEntry,
+} from "./meet-tab-identity.ts";
 
 /** What one look at the machine found. Null means no Meet window, not "we could not look". */
 export interface MeetSighting {
@@ -77,6 +84,10 @@ export interface MeetSighting {
 export interface MeetScan {
   sighting: MeetSighting | null;
   surfaces: MeetSurface[];
+  /** Every browser window was enumerated (a `look`, or a `state` that fell back to one). */
+  full: boolean;
+  /** The remembered Meet tabs asked about, looked up again (meet-tab-identity.ts). */
+  tabChecks: MeetTabCheck[];
 }
 
 /**
@@ -98,6 +109,8 @@ public class MeetWin {
   [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h,StringBuilder s,int n);
   [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr h,out int pid);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  // Whether a remembered Meet tab's window still exists (meet-tab-identity.ts).
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
   public delegate bool EnumProc(IntPtr h,IntPtr p);
   // Window geometry for the recording's crop (meet-call-state.ts Get-MeetGeometry). In this one
   // class so the helper compiles C# once: every Add-Type is a csc run of several hundred ms.
@@ -206,14 +219,26 @@ function Read-Window($w) {
 }
 
 ${MEET_SURFACE_SCRIPT}
+${MEET_TAB_SCRIPT}
 # 'look' enumerates every browser window; 'state' re-reads only the windows Meet was last found in
-# (meet-call-state.ts). Both answer in the same shape.
+# (meet-call-state.ts). Both answer in the same shape. Either may be followed by a space and the
+# remembered Meet tabs to look up again when no surface showed their meeting (meet-tab-identity.ts).
 while ($true) {
   $line = [Console]::In.ReadLine()
   if ($line -eq $null) { break }
-  if ($line -ne 'look' -and $line -ne 'state') { continue }
+  $cmd = $line
+  $spec = ''
+  $sp = $line.IndexOf(' ')
+  if ($sp -gt 0) { $cmd = $line.Substring(0, $sp); $spec = $line.Substring($sp + 1) }
+  if ($cmd -ne 'look' -and $cmd -ne 'state') { continue }
   try {
-    if ($line -eq 'state') { $scan = Read-MeetState } else { $scan = Read-MeetScan (Get-BrowserWindows) }
+    if ($cmd -eq 'state') { $scan = Read-MeetState } else { $scan = Read-MeetScan (Get-BrowserWindows) $true }
+    # Only a pass over every window can say a tab is nowhere; a failed check is no evidence at all.
+    $checks = New-Object System.Collections.ArrayList
+    if ($scan.full -and $spec.Length -gt 0) {
+      try { $checks = Read-TabChecks $spec $scan.surfaces } catch { $checks = New-Object System.Collections.ArrayList }
+    }
+    $scan.tabChecks = $checks
     Write-Output (ConvertTo-Json -Compress -Depth 6 $scan)
   } catch {
     Write-Output (ConvertTo-Json -Compress @{ ok = $false; error = $_.Exception.Message })
@@ -318,18 +343,19 @@ export class MeetUrlSensor {
    * read of the windows Meet was last found in (meet-call-state.ts). They share the helper, so
    * they must not share the single `pending` slot at the same moment - hence the queue.
    */
-  scan(command: "look" | "state" = "look"): Promise<MeetScan> {
+  scan(command: "look" | "state" = "look", watch: MeetTabWatchEntry[] = []): Promise<MeetScan> {
     const epoch = this.epoch;
     const run = () => {
       if (epoch !== this.epoch) throw new Error("The Meet URL sensor was stopped.");
-      return this.ask(command);
+      return this.ask(command, watch);
     };
     const next = this.chain.then(run, run);
     this.chain = next.catch(() => undefined);
     return next;
   }
 
-  private async ask(command: "look" | "state"): Promise<MeetScan> {
+  private async ask(command: "look" | "state", watch: MeetTabWatchEntry[]): Promise<MeetScan> {
+    const spec = formatMeetTabWatch(watch);
     const child = this.ensureStarted();
 
     const line = await new Promise<string | null>((resolve) => {
@@ -344,13 +370,13 @@ export class MeetUrlSensor {
         clearTimeout(timer);
         resolve(value);
       };
-      child.stdin.write(`${command}\n`);
+      child.stdin.write(spec ? `${command} ${spec}\n` : `${command}\n`);
     });
 
     if (line === null) throw new Error("The Meet URL sensor did not answer.");
 
     const parsed = JSON.parse(line) as
-      | { ok: true; sighting: MeetSighting | null; surfaces?: unknown }
+      | { ok: true; sighting: MeetSighting | null; surfaces?: unknown; full?: unknown; tabChecks?: unknown }
       | { ok: false; error: string };
     if (!parsed.ok) throw new Error(parsed.error);
     const surfaces = parseMeetSurfaces(parsed.surfaces);
@@ -359,6 +385,8 @@ export class MeetUrlSensor {
     return {
       sighting: sightingFromScan(parsed.sighting ?? null, surfaces, { preferWindowHandle: this.windowPreference?.() ?? null }),
       surfaces,
+      full: parsed.full === true,
+      tabChecks: parseMeetTabChecks(parsed.tabChecks),
     };
   }
 
