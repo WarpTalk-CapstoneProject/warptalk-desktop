@@ -203,6 +203,23 @@ test("a post-call button inside a live, unreadable toolbar is not the post-call 
   assert.equal(classifyMeetCall([{ ...toolbar, buttons }]).call.reason, "controls-unrecognised");
 });
 
+test("the post-call page with Meet's rating survey (five star buttons) is still the post-call page", () => {
+  // Field log 2026-10-03 (desktop 0.5.1): this page read "controls-unrecognised" until Meet went home.
+  const left = tabSurface(`${LIVE}meet-s4-left-1.json`);
+  const stars = ["Rất kém", "Kém", "Trung bình", "Tốt", "Rất tốt"].map((n) => ({ n, c: "pYTkkf-Bz112c-LgbsSe OjZ2ne" }));
+  const withSurvey = { ...left, buttons: [...left.buttons, ...stars] };
+  assert.deepEqual(
+    { phase: classifyMeetCall([withSurvey]).call.phase, reason: classifyMeetCall([withSurvey]).call.reason },
+    { phase: "left", reason: "rejoin-button" },
+  );
+  // By class alone (a language the table does not hold), and by name alone (renamed classes).
+  assert.equal(classifyMeetCall([unknownLanguage(withSurvey)]).call.reason, "left-page-class");
+  assert.equal(classifyMeetCall([renamedClasses(withSurvey)]).call.phase, "left");
+  // One of the two buttons next to a cluster is still not enough.
+  const rejoinOnly = { ...left, buttons: [left.buttons[0], ...stars] };
+  assert.equal(classifyMeetCall([rejoinOnly]).call.reason, "controls-unrecognised");
+});
+
 test("tracker: a long run of reads without controls (WarpTalk reconnecting) never ends the call", () => {
   const { instance, clock, calls, mics } = tracker();
   instance.ingest(incallMuted());
