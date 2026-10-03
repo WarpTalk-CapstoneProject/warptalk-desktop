@@ -448,6 +448,16 @@ export interface MeetMicState {
  *            never `left`. Reported only after it held for two reads about 1.5 s apart. It is also
  *            what a page the user never joined from looks like, so end a room on it only after an
  *            `in-call` for the same `meetCode`.
+ *            ALSO: the Meet tab itself is gone (meet-tab-identity.ts), read from the browser's tab
+ *            strip - `via: "tab"`, `meetCode` = the closed tab's meeting (always set), no
+ *            `windowHandle` / `windowGeometry`, and `reason` one of
+ *              "tab-closed"     the tab is no longer in its window's tab strip, and no window
+ *                               shows that meeting (so it was not dragged away);
+ *              "tab-navigated"  the same tab is selected but shows another address;
+ *              "window-closed"  the tab's browser window is gone;
+ *              "browser-gone"   the browser process is gone.
+ *            Reported after two full looks at least 3 s apart, and kept (a later surface-less read
+ *            does not turn it back into `unknown`) until Meet is seen again.
  *   unknown  nothing readable: no Meet tab is the ACTIVE tab of a window and there is no PiP window
  *            (UI Automation cannot see a background tab), the buttons could not be recognised,
  *            the read failed, the watch is disarmed, or the platform has no sensor. It never
@@ -457,13 +467,17 @@ export interface MeetMicState {
  * "leave-button-name", "pip-mic-button", "mic-button-no-leave", "rejoin-button",
  * "return-home-button", "left-page-class", "no-call-controls" (unknown), "no-meet-surface", "controls-unrecognised", "empty-tree",
  * "listing-truncated", "pip-without-controls", "probe-failed", "not-watching",
- * "unsupported-platform"); do not branch on it.
+ * "unsupported-platform", the tab reasons of `left` above, and for an `unknown` with no Meet surface
+ * where a remembered tab could not be proved gone: "tab-in-background", "window-minimized",
+ * "tab-strip-unreadable", "tab-still-meet", "document-unreadable", "tab-check-missing",
+ * "tab-check-partial"); do not branch on it, except that a `left` with one of the four tab reasons
+ * is the Meet tab gone rather than Meet's post-call page.
  */
 export interface MeetCallState {
   phase: "lobby" | "in-call" | "left" | "unknown";
   via: "tab" | "pip" | null;
   meetCode: string | null;
-  reason: string;
+  reason: string | MeetCallTabGoneReason;
   /** Date.now() in main when this state was established. */
   atMs: number;
   /**
@@ -482,6 +496,9 @@ export interface MeetCallState {
    */
   windowGeometry?: MeetWindowGeometry;
 }
+
+/** `MeetCallState.reason` of a `left` read from the tab strip: the Meet tab is gone. See above. */
+export type MeetCallTabGoneReason = "tab-closed" | "tab-navigated" | "window-closed" | "browser-gone";
 
 /** A rectangle in physical screen pixels, relative to the top-left of `MeetWindowGeometry.frame`. */
 export interface MeetWindowRect {

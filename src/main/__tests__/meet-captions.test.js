@@ -645,3 +645,53 @@ test("B3: the stream emits interim names by default and summarises counts (no na
   stream.stop();
   assert.equal(summaries.length, 2, "a last summary on stop");
 });
+
+// Prod 2026-10-03 11:38 (v0.5.0, Meet jkm-bfek-dio, the user ALONE in the call): "reads":148,
+// "readsWithCaptions":40, "events":0, "speakers":0. The same numbers come out of the real tree of a
+// call where only the local user spoke: their blocks are headed "Bạn" and are never emitted. The
+// summary now says so, so the next test call tells "nobody else spoke" from "names lost".
+function summarizeOver(tree, reads) {
+  let clock = 0;
+  const events = [];
+  const summaries = [];
+  const stream = new MeetCaptionStream({
+    sensor: { snapshot: async () => ({ found: true, root: tree }), invoke: async () => ({ invoked: false }) },
+    emit: (e) => events.push(e),
+    onSummary: (s) => summaries.push(s),
+    summaryMs: 60_000,
+    now: () => clock,
+    setTimer: () => null,
+    clearTimer: () => {},
+  });
+  stream.start("jkm-bfek-dio");
+  return (async () => {
+    for (let i = 0; i < reads; i++) {
+      clock = i * 400;
+      await stream.tick();
+    }
+    stream.stop();
+    return { events, summary: summaries[summaries.length - 1] };
+  })();
+}
+
+test("B3 prod 11:38: a call where only the local user spoke reads captions yet emits nothing (by design)", async () => {
+  const { events, summary } = await summarizeOver(clone(ON), 5);
+  assert.equal(events.length, 0, "self blocks (Bạn) are never emitted");
+  assert.equal(summary.readsWithCaptions, 5);
+  assert.equal(summary.events, 0);
+  assert.equal(summary.speakers, 0);
+  assert.equal(summary.selfOnlyReads, 5, "the summary says every captioned read was self-only");
+  assert.equal(summary.readsWithOthers, 0);
+  assert.equal(summary.otherSpeakers, 0);
+});
+
+test("B3: with a Meet-side speaker in the real tree, the summary counts them and names are emitted", async () => {
+  const { events, summary } = await summarizeOver(clone(MULTI), 5);
+  assert.ok(events.length > 0);
+  assert.ok(events.every((e) => e.speaker === "16 Huỳnh Ngọc Kỳ"));
+  assert.equal(summary.readsWithOthers, 5);
+  assert.equal(summary.selfOnlyReads, 0);
+  assert.equal(summary.otherSpeakers, 1);
+  assert.equal(summary.speakers, 1);
+  assert.ok(!JSON.stringify(summary).includes("Kỳ"), "counts only, no names in main.log");
+});
