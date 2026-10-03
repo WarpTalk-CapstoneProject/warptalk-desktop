@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { MeetPresenceWatcher } from "../meet-presence.ts";
+import { MeetPresenceWatcher, sightingForPresence } from "../meet-presence.ts";
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -176,5 +176,56 @@ test("arming twice does not start a second interval", async (t) => {
   await flush();
 
   assert.equal(windows.state.calls, afterArm + 1, "one tick must mean one enumeration");
+  watcher.disarm();
+});
+
+test("the 'You left the meeting' page is a Meet window without a call to claim (23:13Z)", () => {
+  const sighting = { ...seen("wst-dpxn-qas"), windowHandle: 5573260 };
+
+  assert.deepEqual(sightingForPresence(sighting, { phase: "left", meetCode: "wst-dpxn-qas" }), {
+    ...sighting,
+    meetCode: null,
+  });
+  // In the call, in the lobby, or unreadable: the code stays.
+  for (const phase of ["in-call", "lobby", "unknown"]) {
+    assert.equal(sightingForPresence(sighting, { phase, meetCode: "wst-dpxn-qas" }), sighting);
+  }
+  // A `left` that belongs to another call (its tab was closed) says nothing about this one.
+  assert.equal(sightingForPresence(sighting, { phase: "left", meetCode: "abc-defg-hij" }), sighting);
+  assert.equal(sightingForPresence(null, { phase: "left", meetCode: "wst-dpxn-qas" }), null);
+  const pip = { meetCode: null, processId: 4242, via: "pip" };
+  assert.equal(sightingForPresence(pip, { phase: "left", meetCode: null }), pip);
+});
+
+test("leaving the call keeps the window in presence and takes the code out; rejoining brings it back", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const observed = [];
+  const call = { phase: "in-call", meetCode: "wst-dpxn-qas" };
+  const windows = fakeWindows(seen("wst-dpxn-qas"));
+  const watcher = new MeetPresenceWatcher({
+    readMeetSighting: async () => sightingForPresence(await windows.read(), call),
+    onChange: (presence) => observed.push(presence),
+    intervalMs: 3000,
+  });
+
+  watcher.arm();
+  await flush();
+  call.phase = "left";
+  t.mock.timers.tick(3000);
+  await flush();
+  call.phase = "in-call";
+  t.mock.timers.tick(3000);
+  await flush();
+
+  assert.deepEqual(
+    observed.map((presence) => [presence.meetWindowVisible, presence.meetCode]),
+    [
+      [true, "wst-dpxn-qas"],
+      [true, undefined],
+      [true, "wst-dpxn-qas"],
+    ],
+  );
+  // The window is still the one to aim a capture or a recording at.
+  assert.equal(watcher.meetProcessId, 4242);
   watcher.disarm();
 });

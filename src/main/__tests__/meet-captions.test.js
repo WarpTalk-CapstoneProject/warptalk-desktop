@@ -246,6 +246,60 @@ test("without tiles, a repeated unpunctuated name still starts a block; a repeat
   assert.deepEqual(parseCaptionTexts(texts, new Set(["Sofia"])).map((b) => b.speaker), ["Daniel Park", "Sofia", "Daniel Park"]);
 });
 
+/** A row of a transcript extension's panel, as dumped live from Tactiq: one Group, one Text. */
+const extensionRow = (text) => ({
+  type: "Group",
+  name: "",
+  className: "wrap-anywhere flex-1 px-2",
+  children: [{ type: "Text", name: text, className: "" }],
+});
+
+test("an extension's transcript rows are not participant tiles", () => {
+  const t = clone(MULTI);
+  // Tactiq mirrors each caption line into its own panel, in the same document.
+  t.children = [...childrenOf(t), extensionRow("lên là để xem bên Google"), extensionRow("Chào Hạnh Nhi Hạnh Nhi Hạnh Nhi")];
+  const tiles = tileNames(t, [findCaptionsRegion(t)]);
+  assert.ok(tiles.has("16 Huỳnh Ngọc Kỳ"));
+  assert.ok(!tiles.has("lên là để xem bên Google"));
+  assert.ok(!tiles.has("Chào Hạnh Nhi Hạnh Nhi Hạnh Nhi"));
+  assert.deepEqual(readCaptions(t).blocks, readCaptions(MULTI).blocks);
+});
+
+test("a Meet tile holding a sentence is not a name", () => {
+  const t = clone(MULTI);
+  const tile = find(t, (n) => n.type === "Group" && childrenOf(n).length === 1 && childrenOf(n)[0].name === "16 Huỳnh Ngọc Kỳ");
+  t.children = [...childrenOf(t), { ...clone(tile), children: [{ type: "Text", name: "Tôi tên là.", className: "" }] }];
+  assert.ok(!tileNames(t, [findCaptionsRegion(t)]).has("Tôi tên là."));
+});
+
+test("a turn keeps the name it was first given: a spoken line never becomes a speaker", () => {
+  const known = new Set(["mạnh trần nguyễn"]);
+  const spoken = new Map();
+  const first = parseCaptionTexts(["mạnh trần nguyễn", "Chào Hạnh Nhi Hạnh Nhi Hạnh Nhi", "Tôi tên là"], known, spoken);
+  assert.deepEqual(first.map((b) => [b.speaker, b.text]), [["mạnh trần nguyễn", "Chào Hạnh Nhi Hạnh Nhi Hạnh Nhi Tôi tên là"]]);
+
+  // Meet trimmed the head of the turn: the first Text is now one of its lines, not a name.
+  const trimmed = parseCaptionTexts(["Tôi tên là", "Trần Mạnh Tuấn"], known, spoken);
+  assert.deepEqual(trimmed.map((b) => [b.speaker, b.text, b.isSelf]), [["mạnh trần nguyễn", "Tôi tên là Trần Mạnh Tuấn", false]]);
+
+  // Without the memory the old rule applies: the first Text names the block.
+  assert.equal(parseCaptionTexts(["Tôi tên là", "Trần Mạnh Tuấn"], known)[0].speaker, "Tôi tên là");
+});
+
+test("a spoken line shown on a tile later does not split the turn; an accepted name still does", () => {
+  const known = new Set();
+  const spoken = new Map();
+  const before = readCaptions(MULTI, known, spoken).blocks;
+  assert.equal(spoken.get("lên là để xem bên Google"), "16 Huỳnh Ngọc Kỳ");
+  assert.ok(!spoken.has("16 Huỳnh Ngọc Kỳ"), "a name is never remembered as speech");
+
+  const t = clone(MULTI);
+  const tile = find(t, (n) => n.type === "Group" && childrenOf(n).length === 1 && childrenOf(n)[0].name === "16 Huỳnh Ngọc Kỳ");
+  t.children = [...childrenOf(t), { ...clone(tile), children: [{ type: "Text", name: "lên là để xem bên Google", className: "" }] }];
+  assert.deepEqual(readCaptions(t, known, spoken).blocks, before);
+  assert.ok(!known.has("lên là để xem bên Google"));
+});
+
 test("flat helper output rebuilds the same tree", () => {
   const flat = [
     { p: -1, t: "Document", n: "Meet", c: "", a: "RootWebArea", o: false, i: false },

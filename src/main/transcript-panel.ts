@@ -75,3 +75,85 @@ export class TranscriptPanelLedger<W> {
     return { roomId };
   }
 }
+
+/** What `PanelNavigator` needs from a window. Electron's `loadURL` semantics: `load` rejects. */
+export interface PanelLoader<W> {
+  currentUrl(window: W): string;
+  load(window: W, target: string): Promise<void>;
+  /** The "cannot reach WarpTalk Web" page shipped with the app. */
+  loadFallback(window: W): Promise<void>;
+  isDestroyed(window: W): boolean;
+  report(message: string, error: unknown): void;
+}
+
+/** Electron rejects a navigation that another navigation replaced with ERR_ABORTED (-3). */
+export function isAbortedLoad(error: unknown): boolean {
+  const e = error as { code?: unknown; errno?: unknown } | null;
+  return e?.code === "ERR_ABORTED" || e?.errno === -3;
+}
+
+/**
+ * Sends the popup to a URL, once.
+ *
+ * WHY THIS EXISTS
+ *   The web app can ask for the same popup twice in the same breath. The first open created the
+ *   window and started loading; the second found a window whose URL was still empty, so it loaded
+ *   the same target again. That aborted the first load, whose catch took ERR_ABORTED for "the web
+ *   UI is unreachable" and loaded the offline page - aborting the second load in turn. The popup
+ *   was left on "Cannot connect to WarpTalk Web" with the network fine (field log 2026-10-03,
+ *   23:00:06Z), until something happened to open it again.
+ *
+ * TWO RULES
+ *   A second request for where the window is already going joins the load in flight.
+ *   A load that was replaced by another navigation has not failed: the offline page is for a load
+ *   that failed on its own, and only while it is still the latest one asked for.
+ */
+export class PanelNavigator<W> {
+  private readonly loader: PanelLoader<W>;
+  private inflight: { window: W; target: string; done: Promise<void> } | null = null;
+
+  constructor(loader: PanelLoader<W>) {
+    this.loader = loader;
+  }
+
+  /**
+   * Whether `window` is on its way to `target` right now.
+   *
+   * One popup per meeting: while it is being created, another open for the same meeting - the
+   * user switched tab or window and the web app's trigger ran again - has nothing to add, and
+   * must not show or focus a window that has not painted yet.
+   */
+  isLoading(window: W, target: string): boolean {
+    return this.inflight?.window === window && this.inflight.target === target;
+  }
+
+  go(window: W, target: string): Promise<void> {
+    const inflight = this.inflight;
+    if (inflight && inflight.window === window) {
+      if (inflight.target === target) return inflight.done;
+    } else if (this.loader.currentUrl(window) === target) {
+      return Promise.resolve();
+    }
+    const mine = { window, target, done: Promise.resolve() };
+    this.inflight = mine;
+    mine.done = this.run(mine);
+    return mine.done;
+  }
+
+  private async run(mine: { window: W; target: string }): Promise<void> {
+    try {
+      await this.loader.load(mine.window, mine.target);
+    } catch (error) {
+      if (this.inflight !== mine || isAbortedLoad(error)) return;
+      this.loader.report("Failed to load the transcript view:", error);
+      if (this.loader.isDestroyed(mine.window)) return;
+      try {
+        await this.loader.loadFallback(mine.window);
+      } catch (fallbackError) {
+        this.loader.report("Failed to load the fallback renderer:", fallbackError);
+      }
+    } finally {
+      if (this.inflight === mine) this.inflight = null;
+    }
+  }
+}

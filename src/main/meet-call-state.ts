@@ -414,6 +414,29 @@ function findLeftPage(buttons: MeetButton[]): string | null {
   return null;
 }
 
+/**
+ * Whether BOTH of the post-call page's own buttons are there: Rejoin and Return to home screen,
+ * each by name or by class.
+ *
+ * The post-call page sometimes carries Meet's "how was the audio and video quality" survey: five
+ * star buttons. Field log 2026-10-03 (desktop 0.5.1, sri-hxht-mux): that page read `unknown`
+ * ("controls-unrecognised") for as long as it stayed open, and the room only ended once Meet
+ * navigated itself home a minute later. The page's buttons were not dumped; the stars being the
+ * cluster `hasControlCluster` saw is inferred from the screenshot, and the test's star classes are
+ * made up. Whatever the cluster was, one post-call button next to it still proves nothing - it
+ * may sit inside a live toolbar nothing here can read - but the pair is the page itself: no call
+ * in progress offers to rejoin it and to go home.
+ */
+function hasBothLeftPageButtons(buttons: MeetButton[]): boolean {
+  const meets = buttons.filter((b) => !isInjected(b));
+  const [rejoinToken, returnHomeToken] = LEFT_PAGE_TOKENS;
+  const rejoin = meets.some((b) => REJOIN_NAMES.has(normalizeLabel(b.n)) || tokensOf(b).includes(rejoinToken));
+  const returnHome = meets.some(
+    (b) => RETURN_HOME_NAMES.has(normalizeLabel(b.n)) || tokensOf(b).includes(returnHomeToken),
+  );
+  return rejoin && returnHome;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The classifier
 // ---------------------------------------------------------------------------------------------
@@ -518,6 +541,8 @@ const NO_MIC: MeetSelfMicReading = { muted: null, stale: false, via: null };
  *                                   renamed its classes AND the language is not in the table).
  *                                   Checked first: a post-call button inside a live toolbar is
  *                                   not a post-call page.
+ *                                   Except with BOTH post-call buttons: that is the post-call
+ *                                   page showing its rating survey (five stars of one family).
  *        post-call page buttons  -> left: Rejoin / Return to home screen, by name or by class.
  *        anything else           -> unknown ("no-call-controls"): the controls are not visible,
  *                                   and that alone says nothing - a reconnecting overlay, a tree
@@ -565,8 +590,12 @@ export function classifyMeetSurface(surface: MeetSurface): MeetCallClassificatio
   if (buttons.length === 0) return { call: reading("unknown", "empty-tree"), mic: NO_MIC, surface };
   // A listing cut short may have lost the very buttons being looked for.
   if (surface.truncated) return { call: reading("unknown", "listing-truncated"), mic: NO_MIC, surface };
-  if (hasControlCluster(buttons)) return { call: reading("unknown", "controls-unrecognised"), mic: NO_MIC, surface };
   const leftPage = findLeftPage(buttons);
+  if (hasControlCluster(buttons)) {
+    // The post-call page with its rating survey also has a cluster; see hasBothLeftPageButtons.
+    if (leftPage && hasBothLeftPageButtons(buttons)) return { call: reading("left", leftPage), mic: NO_MIC, surface };
+    return { call: reading("unknown", "controls-unrecognised"), mic: NO_MIC, surface };
+  }
   if (leftPage) return { call: reading("left", leftPage), mic: NO_MIC, surface };
   return { call: reading("unknown", "no-call-controls"), mic: NO_MIC, surface };
 }

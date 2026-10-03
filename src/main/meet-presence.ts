@@ -44,6 +44,29 @@ export interface MeetPresenceWatcherOptions {
   now?: () => number;
 }
 
+/**
+ * The sighting presence reports, given what the call-state tracker reads on that same call.
+ *
+ * WHY
+ *   Meet's "You left the meeting" page keeps the call's address, so it is still a Meet window -
+ *   but it is not a call. Its room code is what the web app claims a bridge room with, and the
+ *   claim runs again as soon as the previous room has ended: on 2026-10-03 23:13Z a room ended at
+ *   :21 and a new one was claimed for the same code at :24, with its popup offering to translate
+ *   a call the user had just left. So on that page the sighting keeps the window and drops the
+ *   code, exactly as a picture-in-picture sighting has none: nothing downstream may require the
+ *   code to believe a sighting, and without it nothing is claimed. Rejoining brings it back.
+ *
+ *   Only for the call the tracker read: a `left` that belongs to another code (a tab that was
+ *   closed while a different call is on screen) says nothing about this one.
+ */
+export function sightingForPresence(
+  sighting: MeetSighting | null,
+  call: { phase: string; meetCode?: string | null },
+): MeetSighting | null {
+  if (!sighting?.meetCode || call.phase !== "left" || call.meetCode !== sighting.meetCode) return sighting;
+  return { ...sighting, meetCode: null };
+}
+
 /** Slow enough not to matter, fast enough that the widget does not feel late. */
 const DEFAULT_INTERVAL_MS = 3000;
 

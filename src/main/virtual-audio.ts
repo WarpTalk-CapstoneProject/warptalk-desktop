@@ -496,7 +496,36 @@ function includesDeviceName(names: ReadonlySet<string>, expected: string): boole
   return false;
 }
 
-function readWindowsAudioEndpointNames(): string[] {
+/**
+ * The endpoint names to describe: this read's, or the last read's that worked when this one failed.
+ *
+ * WHY
+ *   The read is a PowerShell spawn with a 2.5 s limit, and on a busy machine it runs out. Its
+ *   empty answer used to mean "no virtual device installed": on 2026-10-03 23:06Z a call whose
+ *   Meet microphone WAS the cable was refused browser loopback with B2 driver-missing (the IPC
+ *   took 2543 ms), fell back to a virtual speaker Meet was not playing into, and heard nothing
+ *   from the far side for the whole call. A read that failed says nothing about the devices, and
+ *   a driver does not uninstall itself between two reads. With no earlier read to go by the
+ *   answer stays empty, which fails closed.
+ */
+export function lastGoodEndpointNames(
+  read: () => string[] | null,
+  onFailedRead: (kept: number) => void = () => undefined,
+): () => readonly string[] {
+  let last: readonly string[] | null = null;
+  return () => {
+    const names = read();
+    if (names) {
+      last = names;
+      return names;
+    }
+    onFailedRead(last?.length ?? 0);
+    return last ?? [];
+  };
+}
+
+/** Null when the read itself failed (timed out, errored, unparseable): unknown, not "none". */
+function readWindowsAudioEndpointNames(): string[] | null {
   const script = String.raw`
 $ErrorActionPreference = "SilentlyContinue"
 $roots = @(
@@ -523,7 +552,9 @@ $names | Sort-Object -Unique | ConvertTo-Json -Compress
     timeout: 2500,
     windowsHide: true,
   });
-  if (result.status !== 0 || !result.stdout.trim()) return [];
+  if (result.error || result.status !== 0) return null;
+  // The script ran and matched nothing: no virtual device, which is an answer.
+  if (!result.stdout.trim()) return [];
 
   try {
     const parsed = JSON.parse(result.stdout);
@@ -531,9 +562,13 @@ $names | Sort-Object -Unique | ConvertTo-Json -Compress
       (value): value is string => typeof value === "string",
     );
   } catch {
-    return [];
+    return null;
   }
 }
+
+const windowsAudioEndpointNames = lastGoodEndpointNames(readWindowsAudioEndpointNames, (kept) => {
+  console.warn(`Audio endpoint read failed; keeping the last list that was read (${kept} name(s)).`);
+});
 
 /**
  * `runtimeReady` is asked for rather than inferred.
@@ -639,7 +674,7 @@ export function describeWindowsVirtualAudioForEndpoints(
 
 function detectWindowsVirtualAudio(runtimeReady: boolean): VirtualAudioStatus {
   return describeWindowsVirtualAudioForEndpoints(
-    readWindowsAudioEndpointNames(),
+    windowsAudioEndpointNames(),
     windowsBuildNumber(),
     runtimeReady,
   );
@@ -786,7 +821,7 @@ export function describeMacVirtualAudio(presentBundles: readonly string[]): Virt
 
 /** Whether any virtual audio driver at all is on the machine. */
 export function hasAnyVirtualDriver(): boolean {
-  if (process.platform === "win32") return readWindowsAudioEndpointNames().length > 0;
+  if (process.platform === "win32") return windowsAudioEndpointNames().length > 0;
   if (process.platform !== "darwin") return false;
   return readHalDirectory().length > 0;
 }

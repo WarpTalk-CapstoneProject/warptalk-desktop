@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { TranscriptPanelLedger } from "../transcript-panel.ts";
+import { PanelNavigator, TranscriptPanelLedger, isAbortedLoad } from "../transcript-panel.ts";
 import { trayMenuTemplate } from "../tray-menu.ts";
 
 /** Stands in for a BrowserWindow: the ledger only ever compares identities. */
@@ -116,4 +116,140 @@ test("the tray offers only entries that do something", () => {
   // And no separator is left doubled up where they were.
   const kinds = template.map((item) => (item.type === "separator" ? "-" : "item"));
   assert.ok(!kinds.join(",").includes("-,-"), `adjacent separators: ${kinds.join(",")}`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// PanelNavigator
+// ---------------------------------------------------------------------------------------------
+
+const ROOM_1 = "https://app.example/desktop-transcript/room-1";
+const ROOM_2 = "https://app.example/desktop-transcript/room-2";
+const OFFLINE = "file:///renderer/index.html";
+const aborted = (url) => Object.assign(new Error(`ERR_ABORTED (-3) loading '${url}'`), { code: "ERR_ABORTED", errno: -3 });
+const unreachable = (url) =>
+  Object.assign(new Error(`ERR_INTERNET_DISCONNECTED (-106) loading '${url}'`), { code: "ERR_INTERNET_DISCONNECTED", errno: -106 });
+
+/**
+ * Stands in for a BrowserWindow's webContents: one navigation at a time, and starting another
+ * rejects the one in flight with ERR_ABORTED, as Electron does.
+ */
+function fakeLoader() {
+  const state = { loads: [], reports: [], pending: null };
+  const begin = (win, url) =>
+    new Promise((resolve, reject) => {
+      state.pending?.reject(aborted(state.pending.url));
+      state.loads.push(url);
+      state.pending = {
+        url,
+        resolve: () => {
+          state.pending = null;
+          win.url = url;
+          resolve();
+        },
+        reject: (error) => {
+          state.pending = null;
+          reject(error);
+        },
+      };
+    });
+  return {
+    state,
+    loader: {
+      currentUrl: (win) => win.url,
+      load: begin,
+      loadFallback: (win) => begin(win, OFFLINE),
+      isDestroyed: (win) => win.destroyed === true,
+      report: (message, error) => state.reports.push(`${message} ${error.code}`),
+    },
+  };
+}
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+test("two opens for the same meeting in the same breath load the popup once (field log 23:00:06Z)", async () => {
+  const { state, loader } = fakeLoader();
+  const nav = new PanelNavigator(loader);
+  const win = { url: "" };
+
+  const first = nav.go(win, ROOM_1);
+  // The second open finds a window whose URL is still empty. It used to load the target again,
+  // aborting the first load, whose catch then put the offline page up.
+  assert.equal(nav.isLoading(win, ROOM_1), true);
+  const second = nav.go(win, ROOM_1);
+  assert.equal(second, first, "it joins the load in flight");
+  assert.deepEqual(state.loads, [ROOM_1]);
+
+  state.pending.resolve();
+  await Promise.all([first, second]);
+  assert.equal(win.url, ROOM_1);
+  assert.equal(nav.isLoading(win, ROOM_1), false);
+  assert.deepEqual(state.loads, [ROOM_1], "no reload, no offline page");
+  assert.deepEqual(state.reports, []);
+
+  // Asked again once it is there: nothing to do.
+  await nav.go(win, ROOM_1);
+  assert.deepEqual(state.loads, [ROOM_1]);
+});
+
+test("a load replaced by the move to the next room is not a failure: no offline page", async () => {
+  const { state, loader } = fakeLoader();
+  const nav = new PanelNavigator(loader);
+  const win = { url: "" };
+
+  const first = nav.go(win, ROOM_1);
+  const second = nav.go(win, ROOM_2);
+  await first;
+  await tick();
+  assert.deepEqual(state.loads, [ROOM_1, ROOM_2]);
+
+  state.pending.resolve();
+  await second;
+  assert.equal(win.url, ROOM_2);
+  assert.deepEqual(state.reports, []);
+});
+
+test("a page that redirects itself while loading aborts the load without the offline page", async () => {
+  const { state, loader } = fakeLoader();
+  const nav = new PanelNavigator(loader);
+  const win = { url: "" };
+
+  const going = nav.go(win, ROOM_1);
+  state.pending.reject(aborted(ROOM_1));
+  await going;
+  assert.deepEqual(state.loads, [ROOM_1]);
+  assert.deepEqual(state.reports, []);
+  assert.equal(isAbortedLoad(aborted(ROOM_1)), true);
+  assert.equal(isAbortedLoad(unreachable(ROOM_1)), false);
+});
+
+test("a load that fails on its own shows the offline page, and the next open tries again", async () => {
+  const { state, loader } = fakeLoader();
+  const nav = new PanelNavigator(loader);
+  const win = { url: "" };
+
+  const going = nav.go(win, ROOM_1);
+  state.pending.reject(unreachable(ROOM_1));
+  await tick();
+  assert.deepEqual(state.loads, [ROOM_1, OFFLINE]);
+  state.pending.resolve();
+  await going;
+  assert.deepEqual(state.reports, ["Failed to load the transcript view: ERR_INTERNET_DISCONNECTED"]);
+  assert.equal(win.url, OFFLINE);
+
+  const again = nav.go(win, ROOM_1);
+  assert.deepEqual(state.loads, [ROOM_1, OFFLINE, ROOM_1]);
+  state.pending.resolve();
+  await again;
+  assert.equal(win.url, ROOM_1);
+});
+
+test("a popup closed while loading gets no offline page", async () => {
+  const { state, loader } = fakeLoader();
+  const nav = new PanelNavigator(loader);
+  const win = { url: "" };
+
+  const going = nav.go(win, ROOM_1);
+  win.destroyed = true;
+  state.pending.reject(unreachable(ROOM_1));
+  await going;
+  assert.deepEqual(state.loads, [ROOM_1]);
 });
