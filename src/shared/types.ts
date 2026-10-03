@@ -502,7 +502,9 @@ export interface MeetWindowGeometry {
  * Core Audio cannot see mute - a muted Meet keeps the microphone open - so mute comes from here.
  *
  *   muted  true / false as Meet shows it; null when it is not known (never read, the call was
- *          left, or the button's name and class contradicted each other).
+ *          left, the button's name and class contradicted each other, or two surfaces of the same
+ *          call - a tab and a PiP window, two windows - disagreed). A CHANGE is reported only once
+ *          it has held for about a second over two reads; the first value of a meeting at once.
  *   stale  `muted` is the LAST value read, not a current one: Meet is out of sight (background
  *          tab without PiP), the read failed, or the window is minimized. Do not act on a stale
  *          value as if the user had just pressed the button.

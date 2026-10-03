@@ -398,17 +398,185 @@ test("tracker: joining is reported on the first read, and only once", () => {
   assert.deepEqual(instance.selfMic, mics[0]);
 });
 
-test("tracker: a mute is reported on the very next read", () => {
+test("tracker: a mute is reported once it has held for a second (the next fast read)", () => {
   const { instance, clock, calls, mics } = tracker();
   instance.ingest(incallOn());
   clock.ms += 1000;
   instance.ingest(incallMuted());
   assert.equal(calls.length, 1, "the phase did not change");
-  assert.deepEqual(mics.at(-1), { muted: true, stale: false, via: "class", meetCode: "hqw-cmis-waa", atMs: 11_000 });
+  assert.equal(mics.length, 1, "one read of a change is held, not applied");
+  clock.ms += 1000;
+  instance.ingest(incallMuted());
+  assert.deepEqual(mics.at(-1), { muted: true, stale: false, via: "class", meetCode: "hqw-cmis-waa", atMs: 12_000 });
+  clock.ms += 1000;
+  instance.ingest(incallOn());
   clock.ms += 1000;
   instance.ingest(incallOn());
   assert.equal(mics.at(-1).muted, false);
   assert.equal(mics.length, 3);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Field log 2026-10-03 (desktop 0.4.11, vi UI): Meet's button unmuted, WarpTalk told "muted"
+// ---------------------------------------------------------------------------------------------
+
+test("field 09:20:12: muted / unmuted / muted 436 ms apart is a flap, and the unmuted value stands", () => {
+  // The log's three answers within 2.2 s. One read in between that disagrees (the two cadences,
+  // or a tree caught mid-update) must not move the WarpTalk mic.
+  const { instance, clock, mics } = tracker();
+  instance.ingest(incallOn());
+  const before = mics.length;
+  clock.ms += 1000;
+  instance.ingest(incallMuted()); // 09:20:12.539
+  clock.ms += 436;
+  instance.ingest(incallOn()); // 09:20:12.975
+  clock.ms += 1756;
+  instance.ingest(incallOn()); // 09:20:14.731 would have been the next flip
+  assert.equal(mics.length, before, "nothing was emitted: the mute never held");
+  assert.equal(instance.selfMic.muted, false);
+});
+
+test("a contradictory read in the middle of a pending mute restarts the hold", () => {
+  const { instance, clock, mics } = tracker();
+  instance.ingest(incallOn());
+  clock.ms += 1000;
+  instance.ingest(incallMuted());
+  clock.ms += 500;
+  instance.ingest([]); // Meet out of sight for one read: the streak is broken
+  clock.ms += 600;
+  instance.ingest(incallMuted());
+  assert.equal(instance.selfMic.muted, false, "1.1 s since the first muted read, but not held throughout");
+  clock.ms += 1000;
+  instance.ingest(incallMuted());
+  assert.equal(instance.selfMic.muted, true);
+  assert.equal(mics.at(-1).stale, false);
+});
+
+test("the first reading of a meeting is applied at once, not held", () => {
+  const { instance, mics } = tracker();
+  instance.ingest(incallMuted());
+  assert.deepEqual(
+    { muted: mics.at(-1).muted, stale: mics.at(-1).stale },
+    { muted: true, stale: false },
+  );
+});
+
+/** Two surfaces of the same call: the tab of one window and another window's tab (or PiP). */
+function twoSurfaces(first, second) {
+  return [first, { ...second, processId: 5151, windowHandle: 9090 }];
+}
+
+test("two surfaces of the same call that disagree: unknown, never whichever comes first", () => {
+  // classifyMeetCall used to take the first in-call surface's mic. The presence look lists windows
+  // in z-order and the fast read in the previous look's order, so the answer followed focus.
+  const muted = tabSurface(`${LIVE}meet-s2b-muted-1.json`, { meetCode: "hqw-cmis-waa" });
+  const on = tabSurface(`${LIVE}meet-s2a-incall-1.json`);
+  for (const surfaces of [twoSurfaces(muted, on), twoSurfaces(on, muted)]) {
+    const { call, mic, micEvidence } = classifyMeetCall(surfaces);
+    assert.equal(call.phase, "in-call");
+    assert.deepEqual(mic, { muted: null, stale: false, via: null });
+    assert.equal(micEvidence.rule, "surfaces-conflict");
+    assert.equal(micEvidence.surfaces.length, 2);
+  }
+  // The sticky window (development's preferWindowHandle) chooses the window, never the mic.
+  const sticky = classifyMeetCall(twoSurfaces({ ...on, windowHandle: 7070 }, muted), { preferWindowHandle: 9090 });
+  assert.equal(sticky.call.windowHandle, 9090, "the reported window is the preferred one");
+  assert.equal(sticky.mic.muted, null);
+  // And a tab plus the PiP window of the same call, disagreeing for one read.
+  const [inPip] = parseMeetSurfaces([pip().micMuted]);
+  assert.equal(classifyMeetCall([on, inPip]).mic.muted, null);
+  // Agreeing surfaces still answer.
+  const [pipOn] = parseMeetSurfaces([pip().micOn]);
+  assert.deepEqual(classifyMeetCall([on, pipOn]).mic, { muted: false, stale: false, via: "class" });
+});
+
+test("tracker: two disagreeing surfaces keep the applied value (stale), never flip it to muted", () => {
+  const { instance, clock, mics } = tracker();
+  instance.ingest(incallOn());
+  const muted = tabSurface(`${LIVE}meet-s2b-muted-1.json`, { meetCode: "hqw-cmis-waa" });
+  for (let i = 0; i < 4; i++) {
+    clock.ms += 1000;
+    instance.ingest(twoSurfaces(muted, incallOn()[0]));
+  }
+  assert.ok(mics.every((m) => m.muted !== true), JSON.stringify(mics));
+  assert.deepEqual({ muted: instance.selfMic.muted, stale: instance.selfMic.stale }, { muted: false, stale: true });
+});
+
+test("no known mic label: a red button outside the call controls is not read as 'you are muted'", () => {
+  // The people panel and the tiles come before the toolbar in document order. With a mic label the
+  // vocabulary does not hold (another language, or a label Meet has not been seen to use), the
+  // position tier took the first toggle-styled button anywhere - a red one there read as muted.
+  const surface = unknownLanguage(tabSurface(`${LIVE}meet-s2a-incall-1.json`));
+  const panelButton = { n: "Schaltfläche panel", c: "pYTkkf-Bz112c-LgbsSe JAUIm Y3DJRd humMQc" };
+  const { call, mic, micEvidence } = classifyMeetCall([{ ...surface, buttons: [panelButton, ...surface.buttons] }]);
+  assert.equal(call.phase, "in-call");
+  assert.equal(mic.muted, null);
+  assert.equal(micEvidence.rule, "position-not-call-control");
+  // Without that button the toolbar's mic is still found by position.
+  assert.deepEqual(classifyMeetCall([surface]).micEvidence.rule, "position");
+});
+
+test("a mic label and a class that disagree are never reported as muted (label says on, class says off)", () => {
+  // The other direction of the existing contradiction test: Meet's label is "Turn off microphone"
+  // (live) while the class carries the red token - e.g. a warning style on a live mic.
+  const surface = tabSurface(`${LIVE}meet-s2a-incall-1.json`);
+  const buttons = surface.buttons.map((b) =>
+    b.n === "Tắt micrô" ? { n: b.n, c: b.c.replace("aLTxue", "Y3DJRd") } : b,
+  );
+  const { mic, micEvidence } = classifyMeetCall([{ ...surface, buttons }]);
+  assert.deepEqual(mic, { muted: null, stale: false, via: null });
+  assert.deepEqual(
+    { rule: micEvidence.rule, byLabel: micEvidence.byLabel, byClass: micEvidence.byClass, label: micEvidence.label },
+    { rule: "label-class-conflict", byLabel: "on", byClass: "off", label: "Tắt micrô" },
+  );
+});
+
+test("English labels decide the state too", () => {
+  const surface = tabSurface(`${LIVE}meet-s2a-incall-1.json`);
+  const en = { "Tắt micrô": "Turn off microphone (ctrl + d)", "Rời khỏi cuộc gọi": "Leave call" };
+  const buttons = surface.buttons.map((b) => (en[b.n] ? { n: en[b.n], c: b.c } : b));
+  const { mic, micEvidence } = classifyMeetCall([{ ...surface, buttons }]);
+  assert.deepEqual(mic, { muted: false, stale: false, via: "class" });
+  assert.equal(micEvidence.rule, "label+class");
+});
+
+test("main.log evidence: what was read, once per change, with the outcome", () => {
+  const reads = [];
+  const emitted = [];
+  const { instance, clock } = tracker({
+    onMicRead: (read) => reads.push(read),
+    emitSelfMic: (mic, read) => emitted.push({ mic, read }),
+  });
+  instance.ingest(incallOn());
+  instance.ingest(incallOn()); // same evidence: not logged again
+  clock.ms += 1000;
+  instance.ingest(incallMuted());
+  clock.ms += 1000;
+  instance.ingest(incallMuted());
+  assert.deepEqual(
+    reads.map((r) => [r.outcome, r.rule, r.label, r.byLabel, r.byClass]),
+    [
+      ["applied", "label+class", "Tắt micrô", "on", "on"],
+      ["held", "label+class", "Bật micrô", "off", "off"],
+      ["applied", "label+class", "Bật micrô", "off", "off"],
+    ],
+  );
+  assert.match(reads[0].classes, /\baLTxue\b/);
+  // The emitted value carries the deciding read for the log line.
+  assert.equal(emitted.at(-1).mic.muted, true);
+  assert.equal(emitted.at(-1).read.label, "Bật micrô");
+  assert.equal(emitted.at(-1).read.surface, "tab");
+});
+
+test("main.log evidence: a dropped flap is logged as such", () => {
+  const reads = [];
+  const { instance, clock } = tracker({ onMicRead: (read) => reads.push(read) });
+  instance.ingest(incallOn());
+  clock.ms += 1000;
+  instance.ingest(incallMuted());
+  clock.ms += 400;
+  instance.ingest(incallOn());
+  assert.deepEqual(reads.map((r) => r.outcome), ["applied", "held", "dropped"]);
 });
 
 test("tracker: one 'left' read does not end the call - a re-render must not flap it", () => {
