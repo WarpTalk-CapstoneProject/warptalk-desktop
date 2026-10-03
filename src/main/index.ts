@@ -1830,9 +1830,9 @@ function logWebContents(contents: Electron.WebContents): void {
   contents.on("console-message", (event, ...legacy: unknown[]) => {
     // Electron 35+ puts the details on the event; older versions passed them as arguments.
     const details = event as unknown as { level?: unknown; message?: unknown };
-    const level = rendererConsoleLevel(details.level ?? legacy[0]);
-    if (!level) return;
     const message = typeof details.message === "string" ? details.message : String(legacy[1] ?? "");
+    const level = rendererConsoleLevel(details.level ?? legacy[0], message);
+    if (!level) return;
     log[level]("renderer", `${windowLabel(contents)}: ${message}`);
   });
 }
