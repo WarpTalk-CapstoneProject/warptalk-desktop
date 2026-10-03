@@ -429,8 +429,9 @@ export interface MeetMicState {
  *   lobby    on the meeting's page with a mic button but no Leave button: the green room.
  *   in-call  a Leave button is showing, in the tab (`via:"tab"`) or in Chrome's picture-in-picture
  *            window (`via:"pip"`).
- *   left     a readable Meet page for this code with the call controls gone ("You left the
- *            meeting"). Reported only after it held for two reads about 1.5 s apart. It is also
+ *   left     Meet's post-call page for this code, recognised by its own Rejoin / Return to home
+ *            screen buttons ("You left the meeting"). Call controls merely missing is `unknown`,
+ *            never `left`. Reported only after it held for two reads about 1.5 s apart. It is also
  *            what a page the user never joined from looks like, so end a room on it only after an
  *            `in-call` for the same `meetCode`.
  *   unknown  nothing readable: no Meet tab is the ACTIVE tab of a window and there is no PiP window
@@ -440,7 +441,7 @@ export interface MeetMicState {
  *
  * `reason` is a fixed vocabulary for logs and diagnostics ("leave-button-class",
  * "leave-button-name", "pip-mic-button", "mic-button-no-leave", "rejoin-button",
- * "no-call-controls", "no-meet-surface", "controls-unrecognised", "empty-tree",
+ * "return-home-button", "left-page-class", "no-call-controls" (unknown), "no-meet-surface", "controls-unrecognised", "empty-tree",
  * "listing-truncated", "pip-without-controls", "probe-failed", "not-watching",
  * "unsupported-platform"); do not branch on it.
  */

@@ -46,6 +46,15 @@
  *   guess: an "unknown" leaves the WarpTalk mic and room where they are; a wrong "left" ends a
  *   meeting somebody is still in.
  *
+ * "LEFT" NEEDS EVIDENCE, NOT A MISSING TOOLBAR
+ *   `left` is said only when Meet's post-call page itself is recognised (its Rejoin / Return to home
+ *   screen buttons, by name or by class). A page that merely lacks call controls is `unknown`:
+ *   on 2026-10-03 (desktop 0.4.11) a read with no recognisable toolbar - a network blip that also
+ *   dropped the WarpTalk LiveKit connection, a tree caught mid-rebuild, a tree holding only an
+ *   extension's buttons - was called `left` ("no-call-controls"), and the bridge room stopped its
+ *   capture while the user was still in the call. A Meet tab that is really gone is not this
+ *   module's to say: the address leaves the screen and presence (meet-presence.ts) reports it.
+ *
  * A TRAP THE DUMPS SHOWED: `aLTxue` / `Y3DJRd` ARE NOT THE MIC'S OWN
  *   The camera button carries the very same tokens as the mic (and share-screen, CC, raise-hand
  *   carry `aLTxue` too). So the tokens give the STATE of a toggle, never WHICH toggle it is. The
@@ -180,6 +189,8 @@ const NAME_VOCAB = {
   camera: ["Tắt máy ảnh", "Bật máy ảnh", "Turn off camera", "Turn on camera"],
   leave: ["Rời khỏi cuộc gọi", "Leave call"],
   rejoin: ["Tham gia lại", "Rejoin"],
+  /** The post-call page's second button. vi measured (meet-s4-left-1), en not probed. */
+  returnHome: ["Quay lại màn hình chính", "Return to home screen"],
 } as const;
 
 function labelSet(labels: readonly string[]): Set<string> {
@@ -191,6 +202,16 @@ const MIC_MUTED_NAMES = labelSet(NAME_VOCAB.micIsMuted);
 const CAMERA_NAMES = labelSet(NAME_VOCAB.camera);
 const LEAVE_NAMES = labelSet(NAME_VOCAB.leave);
 const REJOIN_NAMES = labelSet(NAME_VOCAB.rejoin);
+const RETURN_HOME_NAMES = labelSet(NAME_VOCAB.returnHome);
+
+/**
+ * The post-call page's own buttons by class (meet-s4-left-1, 2026-10-02): Rejoin carries `Ac0tsd`,
+ * Return to home screen `ctOmyb`; neither token is on any button of the lobby, call or PiP dumps.
+ * The class tier for "left", so a Meet UI in a language the table does not hold can still say it.
+ * Obfuscated like every Meet class: when they change this stops matching and the answer is
+ * `unknown` - never the other way round.
+ */
+const LEFT_PAGE_TOKENS = ["Ac0tsd", "ctOmyb"];
 
 function tokensOf(button: MeetButton): string[] {
   return button.c.trim().split(/\s+/).filter(Boolean);
@@ -296,6 +317,18 @@ function hasControlCluster(buttons: MeetButton[]): boolean {
   return false;
 }
 
+/**
+ * Positive evidence that this is Meet's post-call page ("You left the meeting" and its kin), or
+ * null. Absence of call controls is NOT evidence; see "LEFT NEEDS EVIDENCE" above.
+ */
+function findLeftPage(buttons: MeetButton[]): string | null {
+  const meets = buttons.filter((b) => !isInjected(b));
+  if (meets.some((b) => REJOIN_NAMES.has(normalizeLabel(b.n)))) return "rejoin-button";
+  if (meets.some((b) => RETURN_HOME_NAMES.has(normalizeLabel(b.n)))) return "return-home-button";
+  if (meets.some((b) => tokensOf(b).some((t) => LEFT_PAGE_TOKENS.includes(t)))) return "left-page-class";
+  return null;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The classifier
 // ---------------------------------------------------------------------------------------------
@@ -342,12 +375,14 @@ const NO_MIC: MeetSelfMicReading = { muted: null, stale: false, via: null };
  *        no buttons at all       -> unknown. Chrome's first read of a tab can come back nearly
  *                                   empty while its accessibility tree wakes; that is not a page
  *                                   without controls, it is a page not yet read.
- *        "Rejoin" by name        -> left
- *        no control cluster      -> left: a readable Meet page for this code, and the toolbar is
- *                                   gone. Language- and class-independent.
- *        anything else           -> unknown: a toolbar is there and neither tier can read it (Meet
+ *        control cluster         -> unknown: a toolbar is there and neither tier can read it (Meet
  *                                   renamed its classes AND the language is not in the table).
- *                                   This is the case that must not be called "left".
+ *                                   Checked first: a post-call button inside a live toolbar is
+ *                                   not a post-call page.
+ *        post-call page buttons  -> left: Rejoin / Return to home screen, by name or by class.
+ *        anything else           -> unknown ("no-call-controls"): the controls are not visible,
+ *                                   and that alone says nothing - a reconnecting overlay, a tree
+ *                                   caught mid-rebuild, an extension's buttons only. Never "left".
  *   pip  Leave or mic button     -> in-call. Chrome only opens this window for a call in progress.
  *        neither                 -> unknown, and the window does not count as Meet at all: its
  *                                   title is written by a page, so a title alone proves nothing.
@@ -384,11 +419,10 @@ export function classifyMeetSurface(surface: MeetSurface): MeetCallClassificatio
   if (buttons.length === 0) return { call: reading("unknown", "empty-tree"), mic: NO_MIC, surface };
   // A listing cut short may have lost the very buttons being looked for.
   if (surface.truncated) return { call: reading("unknown", "listing-truncated"), mic: NO_MIC, surface };
-  if (buttons.some((b) => !isInjected(b) && REJOIN_NAMES.has(normalizeLabel(b.n)))) {
-    return { call: reading("left", "rejoin-button"), mic: NO_MIC, surface };
-  }
-  if (!hasControlCluster(buttons)) return { call: reading("left", "no-call-controls"), mic: NO_MIC, surface };
-  return { call: reading("unknown", "controls-unrecognised"), mic: NO_MIC, surface };
+  if (hasControlCluster(buttons)) return { call: reading("unknown", "controls-unrecognised"), mic: NO_MIC, surface };
+  const leftPage = findLeftPage(buttons);
+  if (leftPage) return { call: reading("left", leftPage), mic: NO_MIC, surface };
+  return { call: reading("unknown", "no-call-controls"), mic: NO_MIC, surface };
 }
 
 const PHASE_RANK: Record<MeetCallPhase, number> = { "in-call": 3, lobby: 2, left: 1, unknown: 0 };
