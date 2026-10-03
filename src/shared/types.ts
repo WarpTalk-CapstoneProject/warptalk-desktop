@@ -261,7 +261,16 @@ export interface AudioCaptureState {
  * window is never recorded (WT-910 B18); arm again once the call is back on its tab.
  */
 export type ArmMeetWindowCaptureResult =
-  | { ok: true; sourceName: string }
+  | {
+      ok: true;
+      sourceName: string;
+      /**
+       * The HWND of the window that will be handed out, so the web app can tell when the Meet tab
+       * has moved to another window (`MeetCallState.windowHandle`) and re-arm. Absent from older
+       * builds.
+       */
+      windowHandle?: number;
+    }
   | {
       ok: false;
       reason:
@@ -396,6 +405,16 @@ export interface EnsureMeetCaptionsResult {
  *   real       active session(s) on physical microphones only
  *   ambiguous  active sessions on the cable AND on another endpoint
  *   unknown    no active session (Meet not capturing, possibly muted), or the probe failed
+ *
+ * `speaker` answers the same question for the browser's OUTPUT, from render endpoints (optional,
+ * absent on desktop builds that predate it and when the probe failed):
+ *   cable      an active browser session plays into "CABLE Input (VB-Audio Virtual Cable)" - alone
+ *              or beside another device. Meet's far side then comes back out of "CABLE Output"
+ *              (Meet's microphone in a voice bridge) and the user hears nothing of the call.
+ *              "Hi-Fi Cable Input" never counts as this.
+ *   real       active session(s) on physical speakers only
+ *   unknown    nothing playing (Chrome may stop its output in a silent call), only another virtual
+ *              device, or the render side could not be read
  */
 export interface MeetMicState {
   state: "cable" | "real" | "unknown" | "ambiguous";
@@ -410,6 +429,10 @@ export interface MeetMicState {
     | "other-virtual-device"
     | "probe-failed"
     | "unsupported-platform";
+  /** Where the browser plays to; see above. Optional and additive. */
+  speaker?: "cable" | "real" | "unknown";
+  /** Every render endpoint with an active browser session, for diagnostics. */
+  speakerEndpoints?: string[];
   /** Date.now() of the read. */
   at: number;
 }
@@ -420,8 +443,9 @@ export interface MeetMicState {
  *   lobby    on the meeting's page with a mic button but no Leave button: the green room.
  *   in-call  a Leave button is showing, in the tab (`via:"tab"`) or in Chrome's picture-in-picture
  *            window (`via:"pip"`).
- *   left     a readable Meet page for this code with the call controls gone ("You left the
- *            meeting"). Reported only after it held for two reads about 1.5 s apart. It is also
+ *   left     Meet's post-call page for this code, recognised by its own Rejoin / Return to home
+ *            screen buttons ("You left the meeting"). Call controls merely missing is `unknown`,
+ *            never `left`. Reported only after it held for two reads about 1.5 s apart. It is also
  *            what a page the user never joined from looks like, so end a room on it only after an
  *            `in-call` for the same `meetCode`.
  *   unknown  nothing readable: no Meet tab is the ACTIVE tab of a window and there is no PiP window
@@ -431,7 +455,7 @@ export interface MeetMicState {
  *
  * `reason` is a fixed vocabulary for logs and diagnostics ("leave-button-class",
  * "leave-button-name", "pip-mic-button", "mic-button-no-leave", "rejoin-button",
- * "no-call-controls", "no-meet-surface", "controls-unrecognised", "empty-tree",
+ * "return-home-button", "left-page-class", "no-call-controls" (unknown), "no-meet-surface", "controls-unrecognised", "empty-tree",
  * "listing-truncated", "pip-without-controls", "probe-failed", "not-watching",
  * "unsupported-platform"); do not branch on it.
  */
@@ -442,6 +466,48 @@ export interface MeetCallState {
   reason: string;
   /** Date.now() in main when this state was established. */
   atMs: number;
+  /**
+   * The top-level HWND of the browser window that hosts the Meet TAB, as a decimal number. Tab
+   * readings only (`via: "tab"`): absent while Meet is in picture-in-picture (`via: "pip"`; the PiP
+   * window is never recorded, and its HWND would change this on every tab/PiP switch) and with
+   * `via: null` (`unknown` without a surface), as well as when the surface had no handle and from
+   * older builds. A Meet tab dragged into a new browser window changes it, and the web app re-arms
+   * its recording capture on the new one (WT-910).
+   */
+  windowHandle?: number;
+  /**
+   * Where the page content sits in that window, for cropping the browser chrome (tab strip, address
+   * bar, bookmarks bar) out of the recording (WT-910). Only for `via: "tab"`; absent when it could
+   * not be read or failed its checks (see meet-window-geometry.ts), and from older builds.
+   */
+  windowGeometry?: MeetWindowGeometry;
+}
+
+/** A rectangle in physical screen pixels, relative to the top-left of `MeetWindowGeometry.frame`. */
+export interface MeetWindowRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * One browser window's layout, as read by UI Automation and Win32 in one coordinate space (the
+ * helper runs per-monitor DPI aware, so physical pixels). Everything is relative to the visible
+ * window's top-left, so moving the window changes nothing and only a real layout change (bookmarks
+ * bar toggled, window resized, fullscreen) produces a new value.
+ *
+ *   frame    the visible window: DWMWA_EXTENDED_FRAME_BOUNDS. Always x = y = 0.
+ *   window   GetWindowRect, which also covers the invisible resize borders (about 7-8 px on the
+ *            left, right and bottom; off-screen on a maximized window). A window capture's frame
+ *            covers one of these two; the web side tells which from the frame's own size.
+ *   content  the page's Document element: the web contents' viewport, below the tab strip, the
+ *            address bar, the bookmarks bar and any infobar, beside any side panel.
+ */
+export interface MeetWindowGeometry {
+  frame: MeetWindowRect;
+  window: MeetWindowRect;
+  content: MeetWindowRect;
 }
 
 /**
@@ -452,7 +518,9 @@ export interface MeetCallState {
  * Core Audio cannot see mute - a muted Meet keeps the microphone open - so mute comes from here.
  *
  *   muted  true / false as Meet shows it; null when it is not known (never read, the call was
- *          left, or the button's name and class contradicted each other).
+ *          left, the button's name and class contradicted each other, or two surfaces of the same
+ *          call - a tab and a PiP window, two windows - disagreed). A CHANGE is reported only once
+ *          it has held for about a second over two reads; the first value of a meeting at once.
  *   stale  `muted` is the LAST value read, not a current one: Meet is out of sight (background
  *          tab without PiP), the read failed, or the window is minimized. Do not act on a stale
  *          value as if the user had just pressed the button.

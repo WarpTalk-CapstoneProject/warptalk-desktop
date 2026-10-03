@@ -43,10 +43,23 @@
  *   again when the tab is back. Arming is repeatable for that reason: each arm replaces the last,
  *   and only the first grant for a room announces the recording.
  *   macOS has no HWND and no sensor PID; it answers `unsupported-platform`.
+ *
+ * A MEET TAB MOVED TO ANOTHER WINDOW (2026-10-03)
+ *   Dragging the Meet tab out of its window gives the call a new HWND, and a granted capture keeps
+ *   recording the old window, which now shows some other tab. The call state carries the HWND the
+ *   call was read from (`MeetCallState.windowHandle`) and a granted arm answers with the HWND it
+ *   will hand out (`windowHandle` on the result), so the web app sees the two differ and arms
+ *   again. Which window an arm captures, and whether it is refused as PiP, is decided in one place
+ *   from one source (meetWindowForArm, meet-window-geometry.ts): the call-state tracker's in-call
+ *   reading while its latest read is fresh and agrees with it - right after a drag the presence
+ *   sighting still names the old window - and the presence sighting otherwise. An in-call state the
+ *   latest read already doubts (an `unknown` awaiting confirmation) is refused as `meet-not-on-tab`:
+ *   the window may already show another tab, and the web app arms again once it has settled.
  */
 
 import type { ArmMeetWindowCaptureResult } from "../shared/types.ts";
 import { parseDesktopSourceWindowHandle } from "./windows-loopback-sources.ts";
+import { isWindowHandle } from "./window-handle.ts";
 
 /** How long an arm waits for its getDisplayMedia. The web app calls it straight after arming. */
 export const MEET_WINDOW_CAPTURE_ARM_TTL_MS = 10_000;
@@ -104,7 +117,7 @@ export function resolveMeetWindowSource<S extends { id: string }>(
   // B18: the PiP window is never recorded, whatever its handle.
   if (sighting.inPictureInPicture === true) return { ok: false, reason: "meet-not-on-tab" };
   const handle = sighting.windowHandle;
-  if (typeof handle !== "number" || !Number.isSafeInteger(handle) || handle <= 0) {
+  if (!isWindowHandle(handle)) {
     return { ok: false, reason: "meet-window-not-found" };
   }
   const source = sources.find((candidate) => parseDesktopSourceWindowHandle(candidate.id) === handle);

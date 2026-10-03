@@ -65,6 +65,7 @@ import {
 } from "./meet-captions";
 import { MeetMicStateStream, MicSessionSensor } from "./meet-mic-state";
 import { MeetCallStateTracker } from "./meet-call-state";
+import { meetWindowForArm } from "./meet-window-geometry";
 import { TranscriptPanelLedger } from "./transcript-panel";
 import { SignedOutMeetPrompt } from "./signed-out-meet-prompt";
 import { trayMenuTemplate } from "./tray-menu";
@@ -88,6 +89,7 @@ import type {
 } from "../shared/types";
 import {
   describeWindowsLoopbackSources,
+  parseDesktopSourceWindowHandle,
   resolveWindowOwnerProcessId,
 } from "./windows-loopback-sources";
 import {
@@ -168,18 +170,32 @@ const meetUrlSensor = process.platform === "darwin" ? new MacMeetUrlSensor() : n
 const meetCallTracker = new MeetCallStateTracker({
   probe:
     meetUrlSensor instanceof MeetUrlSensor
-      ? async () => (await meetUrlSensor.scan("state")).surfaces
+      ? async () => {
+          const scan = await meetUrlSensor.scan("state");
+          // The same read refreshes presence's window and PiP flag, so an arm never leans on a
+          // sighting older than this second (meetWindowForArm, WT-910).
+          meetPresenceWatcher.noteWindow(scan.sighting);
+          return scan.surfaces;
+        }
       : null,
   emitCallState: (state) => {
     console.log("Meet call state:", JSON.stringify(state));
     sendToWindows([mainWindow, transcriptPanel.window], "bridge:meet-call-state", state);
     observeMeetForCaptureGuard();
   },
-  emitSelfMic: (mic) => {
-    mainLog?.info("meet", "self mic", mic);
+  emitSelfMic: (mic, evidence) => {
+    // The renderer gets `mic` only; main.log also gets what the deciding read saw (Meet's button
+    // label and class - UI strings, never caption or transcript text).
+    mainLog?.info("meet", "self mic", evidence ? { ...mic, read: evidence } : mic);
     sendToWindows([mainWindow, transcriptPanel.window], "bridge:meet-self-mic", mic);
   },
+  onMicRead: (read) => {
+    mainLog?.info("meet", "self mic read", read);
+  },
 });
+// The sensor picks its sighting's window with the tracker's own tie-break, so presence and the call
+// state never name two different Meet windows (sightingFromScan).
+if (meetUrlSensor instanceof MeetUrlSensor) meetUrlSensor.setWindowPreference(() => meetCallTracker.windowPreference);
 
 /** The presence look, which on Windows also carries the buttons the call-state tracker reads. */
 async function readMeetSighting(): Promise<Awaited<ReturnType<MeetUrlSensor["read"]>>> {
@@ -295,7 +311,20 @@ const meetCaptionStream = new MeetCaptionStream({
   now: alignedNow,
   audioActive: () => loopbackCapturing,
   emit: (event) => meetCaptionBuffer.event(event),
-  emitStatus: (status) => meetCaptionBuffer.status(status),
+  emitStatus: (status) => {
+    // On change only (the stream dedupes statuses): whether the sensor could read the captions.
+    mainLog?.info("meet", "captions status", {
+      meetCode: status.meetCode,
+      running: status.running,
+      state: status.state,
+      captionsVisible: status.captionsVisible,
+      error: status.error,
+    });
+    meetCaptionBuffer.status(status);
+  },
+  // Counts only, once a minute: did names reach the renderer, and was it listening (bug B3).
+  onSummary: (summary) =>
+    mainLog?.info("meet", "captions summary", { ...summary, rendererSubscribed: meetCaptionBuffer.isSubscribed }),
 });
 const ensureMeetCaptionsOnce = singleFlight((meetCode) => ensureCaptionsOn(meetCaptionSensor, meetCode));
 
@@ -313,7 +342,11 @@ const meetMicStream = new MeetMicStateStream({
   // Our own tree is excluded by ancestry anyway; the metrics list also covers any helper Electron
   // reparented.
   excludePids: () => [process.pid, ...app.getAppMetrics().map((metric) => metric.pid)],
-  emit: (state) => sendMeetMicState(state),
+  emit: (state) => {
+    // Emitted only on a change. Device names and states only - nothing the user said.
+    mainLog?.info("meet", "mic state", state);
+    sendMeetMicState(state);
+  },
 });
 
 function sendMeetMicState(state: MeetMicState, only?: Electron.WebContents): void {
@@ -441,19 +474,31 @@ function registerIpcHandlers(): void {
         return { ok: false, reason: "meet-window-not-found" };
       }
 
-      // Read after the await: the sighting the arm is matched against is the newest one.
+      // Read after the await: the sighting the arm is matched against is the newest one. The
+      // window and the PiP gate come from ONE source (meetWindowForArm): the call-state tracker's
+      // fresh in-call reading when there is one, presence otherwise. Right after the Meet tab is
+      // dragged out of PiP or into a new window, only the tracker already knows.
+      const target = meetWindowForArm({
+        sighting: { windowHandle: meetPresenceWatcher.meetWindowHandle, via: meetPresenceWatcher.meetWindowVia },
+        call: meetCallTracker.callState,
+        latest: meetCallTracker.latestReading,
+        nowMs: Date.now(),
+      });
       const resolved = resolveMeetWindowSource(
         {
           armed: meetPresenceWatcher.armed,
           visible: meetPresenceWatcher.meetWindowVisible,
-          windowHandle: meetPresenceWatcher.meetWindowHandle,
-          inPictureInPicture:
-            meetPresenceWatcher.meetWindowVia === "pip" || meetCallTracker.callState.via === "pip",
+          windowHandle: target.windowHandle,
+          // An in-call state being doubted is refused like PiP (meet-not-on-tab): the web app
+          // arms again once it has settled.
+          inPictureInPicture: target.inPictureInPicture || target.unsettled,
         },
         sources,
       );
       if (!resolved.ok) {
-        console.log(`Meet window capture not armed: ${resolved.reason}.`);
+        console.log(
+          `Meet window capture not armed: ${resolved.reason} (from ${target.source}${target.unsettled ? ", call state unsettled" : ""}).`,
+        );
         return { ok: false, reason: resolved.reason };
       }
 
@@ -461,8 +506,16 @@ function registerIpcHandlers(): void {
         { webContentsId: event.sender.id, source: resolved.source, roomId: roomId as string },
         Date.now(),
       );
-      console.log("Meet window capture armed for the next getDisplayMedia from the main window.");
-      return { ok: true, sourceName: resolved.source.name };
+      const windowHandle = parseDesktopSourceWindowHandle(resolved.source.id);
+      console.log(
+        `Meet window capture armed for the next getDisplayMedia from the main window (HWND ${windowHandle}, from ${target.source}).`,
+      );
+      // The HWND goes back so the web app can tell when the Meet tab has moved to another window.
+      return {
+        ok: true,
+        sourceName: resolved.source.name,
+        ...(typeof windowHandle === "number" ? { windowHandle } : {}),
+      };
     },
   );
   // Arm/disarm rather than a query: the renderer would otherwise have to poll main, which polls
@@ -1788,9 +1841,9 @@ function logWebContents(contents: Electron.WebContents): void {
   contents.on("console-message", (event, ...legacy: unknown[]) => {
     // Electron 35+ puts the details on the event; older versions passed them as arguments.
     const details = event as unknown as { level?: unknown; message?: unknown };
-    const level = rendererConsoleLevel(details.level ?? legacy[0]);
-    if (!level) return;
     const message = typeof details.message === "string" ? details.message : String(legacy[1] ?? "");
+    const level = rendererConsoleLevel(details.level ?? legacy[0], message);
+    if (!level) return;
     log[level]("renderer", `${windowLabel(contents)}: ${message}`);
   });
 }

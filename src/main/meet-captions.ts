@@ -403,6 +403,8 @@ interface TrackedBlock {
   firstSeenMs: number;
   lastChangeMs: number;
   emittedText: string | null;
+  /** When this block was last emitted (stable or interim); null before its first emission. */
+  lastEmitMs: number | null;
   confidence: "live" | "batch";
 }
 
@@ -414,6 +416,19 @@ export interface CaptionTrackerOptions {
   batchChars?: number;
   /** A gap between reads longer than this makes the next change a batch. */
   gapMs?: number;
+  /**
+   * When set, a block that is still growing is also emitted (as `caption`, then `update`) at most
+   * once per `interimMs` while its text changes, instead of only once it has been unchanged for
+   * `stableMs`. Off (undefined) by default; `MeetCaptionStream` turns it on.
+   *
+   * WHY (bug B3): Meet keeps ONE block per speaker turn and grows it while they talk, so a
+   * stable-only tracker names a speaker only after they STOP (+ stableMs + the hop to Redis). The
+   * STT worker attributes each stand-in line the moment it is recognised - mid-turn for early
+   * sentences - against the hints already in Redis, so it never saw the current speaker's name and
+   * every Meet line fell back to "Google Meet participants". Interim emissions put the speaker's
+   * name in Redis while the turn is still going.
+   */
+  interimMs?: number;
 }
 
 /**
@@ -424,13 +439,15 @@ export interface CaptionTrackerOptions {
  * same offset, else the offset is searched; no match means the region was replaced. A block is
  * emitted once its text has been unchanged for `stableMs` (`kind:"caption"`); if Meet rewrites it
  * afterwards it is emitted again with the same `blockId` (`kind:"update"`) - consumers keep the
- * latest. Self blocks are tracked for alignment and never emitted.
+ * latest. Self blocks are tracked for alignment and never emitted. With `interimMs` a growing block
+ * is also emitted while it grows (its `tStableMs` is then the emission time, not a verdict).
  */
 export class CaptionTracker {
   private readonly meetCode: string;
   private readonly stableMs: number;
   private readonly batchChars: number;
   private readonly gapMs: number;
+  private readonly interimMs: number | null;
   private tracked: TrackedBlock[] = [];
   private nextId = 1;
   private readonly epoch = Math.random().toString(36).slice(2, 8);
@@ -446,6 +463,7 @@ export class CaptionTracker {
     this.stableMs = options.stableMs ?? 1200;
     this.batchChars = options.batchChars ?? 160;
     this.gapMs = options.gapMs ?? 2500;
+    this.interimMs = typeof options.interimMs === "number" && options.interimMs > 0 ? options.interimMs : null;
   }
 
   private newBlock(b: CaptionBlock, now: number, confidence: "live" | "batch"): TrackedBlock {
@@ -457,6 +475,7 @@ export class CaptionTracker {
       firstSeenMs: now,
       lastChangeMs: now,
       emittedText: null,
+      lastEmitMs: null,
       confidence,
     };
   }
@@ -557,7 +576,12 @@ export class CaptionTracker {
   private collect(now: number, events: MeetCaptionEvent[], force: boolean, pool: TrackedBlock[] = this.tracked): MeetCaptionEvent[] {
     for (const t of pool) {
       if (t.isSelf || !t.text || t.text === t.emittedText) continue;
-      if (!force && now - t.lastChangeMs < this.stableMs) continue;
+      if (!force && now - t.lastChangeMs < this.stableMs) {
+        // Still growing: an interim emission, throttled, when enabled (see `interimMs`).
+        const interimDue =
+          this.interimMs !== null && (t.lastEmitMs === null || now - t.lastEmitMs >= this.interimMs);
+        if (!interimDue) continue;
+      }
       events.push({
         meetCode: this.meetCode,
         blockId: t.id,
@@ -572,6 +596,7 @@ export class CaptionTracker {
         source: "meet_caption",
       });
       t.emittedText = t.text;
+      t.lastEmitMs = now;
     }
     return events;
   }
@@ -694,10 +719,36 @@ export interface MeetCaptionStreamOptions {
   intervalMs?: number;
   staleMs?: number;
   stableMs?: number;
+  /** Interim emission of a growing block (CaptionTrackerOptions.interimMs). Default 700 ms; 0 = off. */
+  interimMs?: number;
+  /**
+   * Called about once per `summaryMs` (default 60 s) while the stream runs, and once on stop, with
+   * counts only - never caption text or speaker names (main-log's rule). For main.log, so a test
+   * call shows whether names were read at all.
+   */
+  onSummary?: (summary: MeetCaptionStreamSummary) => void;
+  summaryMs?: number;
   /** Timer seam for tests; defaults to setTimeout/clearTimeout. */
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
 }
+
+/** What the stream did since the previous summary. Counts only. */
+export interface MeetCaptionStreamSummary {
+  meetCode: string;
+  state: MeetCaptionStatus["state"];
+  captionsVisible: boolean;
+  /** Reads of the tab in this period, and how many of them showed the captions region. */
+  reads: number;
+  readsWithCaptions: number;
+  /** Events emitted (each one a speaker-name hint), and how many distinct speakers they named. */
+  events: number;
+  speakers: number;
+  periodMs: number;
+}
+
+/** Default throttle for interim emissions of a growing caption block. */
+export const MEET_CAPTION_INTERIM_MS = 700;
 
 /**
  * Reads the Meet tab every `intervalMs` (350 ms) while enabled. Reads never overlap: the next one
@@ -712,6 +763,9 @@ export class MeetCaptionStream {
   private timer: unknown = null;
   private generation = 0;
   private lastStatusKey = "";
+  private lastState: MeetCaptionStatus["state"] = "unavailable_tab_inactive";
+  private lastCaptionsVisible = false;
+  private period = { startMs: 0, reads: 0, readsWithCaptions: 0, events: 0, speakers: new Set<string>() };
 
   constructor(options: MeetCaptionStreamOptions) {
     this.options = options;
@@ -726,8 +780,13 @@ export class MeetCaptionStream {
     if (this.meetCode === meetCode) return;
     this.stop();
     this.meetCode = meetCode;
-    this.tracker = new CaptionTracker({ meetCode, stableMs: this.options.stableMs });
+    this.tracker = new CaptionTracker({
+      meetCode,
+      stableMs: this.options.stableMs,
+      interimMs: this.options.interimMs ?? MEET_CAPTION_INTERIM_MS,
+    });
     this.known = new Set();
+    this.resetPeriod(this.now());
     const generation = ++this.generation;
     this.schedule(generation, 0);
   }
@@ -737,7 +796,8 @@ export class MeetCaptionStream {
     if (this.timer !== null) (this.options.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.timer);
     this.timer = null;
     if (this.tracker && this.meetCode) {
-      for (const event of this.tracker.flush(this.now())) this.options.emit(event);
+      for (const event of this.tracker.flush(this.now())) this.emitEvent(event);
+      this.summarize(this.now(), true);
       this.status({
         meetCode: this.meetCode,
         running: false,
@@ -753,6 +813,34 @@ export class MeetCaptionStream {
 
   private now(): number {
     return (this.options.now ?? alignedNow)();
+  }
+
+  private emitEvent(event: MeetCaptionEvent): void {
+    this.period.events++;
+    this.period.speakers.add(event.speaker);
+    this.options.emit(event);
+  }
+
+  private resetPeriod(now: number): void {
+    this.period = { startMs: now, reads: 0, readsWithCaptions: 0, events: 0, speakers: new Set() };
+  }
+
+  private summarize(now: number, force: boolean): void {
+    if (!this.meetCode || !this.options.onSummary) return;
+    const periodMs = now - this.period.startMs;
+    if (!force && periodMs < (this.options.summaryMs ?? 60_000)) return;
+    const p = this.period;
+    this.options.onSummary({
+      meetCode: this.meetCode,
+      state: this.lastState,
+      captionsVisible: this.lastCaptionsVisible,
+      reads: p.reads,
+      readsWithCaptions: p.readsWithCaptions,
+      events: p.events,
+      speakers: p.speakers.size,
+      periodMs,
+    });
+    this.resetPeriod(now);
   }
 
   private schedule(generation: number, delay: number): void {
@@ -779,7 +867,9 @@ export class MeetCaptionStream {
         blocks = readCaptions(snap.root, this.known).blocks;
         captionsVisible = blocks !== null;
       }
-      for (const event of tracker.ingest(now, blocks)) this.options.emit(event);
+      this.period.reads++;
+      if (blocks !== null) this.period.readsWithCaptions++;
+      for (const event of tracker.ingest(now, blocks)) this.emitEvent(event);
     } catch (e) {
       if (generation !== this.generation) return;
       state = "unavailable_tab_inactive";
@@ -793,6 +883,9 @@ export class MeetCaptionStream {
     if (state !== "live") tracker.markGap(state === "stale" ? "stale" : "unavailable");
     tracker.stale = state !== "live";
     this.status({ meetCode, running: true, state, captionsVisible, lastChangeMs: tracker.lastChangeMs, error });
+    this.lastState = state;
+    this.lastCaptionsVisible = captionsVisible;
+    this.summarize(now, false);
     // Unavailable: slower, but never stopped - a read is also what keeps Chrome's accessibility
     // tree awake (Chrome turns it off after ~30 s without accessibility calls during input).
     // TODO(meet-captions): a UIA StructureChanged/TextChanged subscription on the captions group

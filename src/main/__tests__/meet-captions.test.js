@@ -565,3 +565,83 @@ test("bridgeMeetCaptionNames flag: env wins, otherwise on in dev and in packaged
     assert.equal(meetCaptionNamesEnabled(off, false), false, `kill switch ${JSON.stringify(off)} in dev`);
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// Bug B3: names must reach the server WHILE a Meet speaker is still talking
+// ---------------------------------------------------------------------------------------------
+
+test("B3: with interimMs a growing block is named while it grows, not only after it stops", () => {
+  const tr = new CaptionTracker({ meetCode: "abc-defg-hij", interimMs: 700 });
+  const events = [];
+  const at = (t, blocks) => events.push(...tr.ingest(t, blocks));
+  at(0, []);
+  // One long turn: Meet keeps growing the same block for 3 s.
+  at(400, [B("16 Huỳnh Ngọc Kỳ", "Xin")]);
+  at(800, [B("16 Huỳnh Ngọc Kỳ", "Xin chào")]);
+  at(1200, [B("16 Huỳnh Ngọc Kỳ", "Xin chào mọi")]);
+  at(1600, [B("16 Huỳnh Ngọc Kỳ", "Xin chào mọi người")]);
+  at(2000, [B("16 Huỳnh Ngọc Kỳ", "Xin chào mọi người hôm")]);
+  at(2400, [B("16 Huỳnh Ngọc Kỳ", "Xin chào mọi người hôm nay")]);
+  at(2800, [B("16 Huỳnh Ngọc Kỳ", "Xin chào mọi người hôm nay"), B("Bạn", "Dạ", true)]);
+  at(4100, [B("16 Huỳnh Ngọc Kỳ", "Xin chào mọi người hôm nay"), B("Bạn", "Dạ vâng", true)]);
+
+  // First sighting at once, then at most every 700 ms while it grows; the stable pass adds nothing
+  // when the text did not change since the last interim.
+  assert.deepEqual(events.map((e) => [e.kind, e.tStartMs, e.tEndMs, e.tStableMs]), [
+    ["caption", 400, 400, 400],
+    ["update", 400, 1200, 1200],
+    ["update", 400, 2000, 2000],
+    ["update", 400, 2400, 2800],
+  ]);
+  assert.ok(events.every((e) => e.speaker === "16 Huỳnh Ngọc Kỳ"), "the Meet name, prefix and all");
+  assert.equal(new Set(events.map((e) => e.blockId)).size, 1);
+  // The local user ("Bạn" / "You") is never a Meet-side hint, interim or stable.
+  assert.ok(!events.some((e) => e.speaker === "Bạn"));
+});
+
+test("B3: without interimMs the tracker still emits only stable blocks (unchanged default)", () => {
+  const tr = new CaptionTracker({ meetCode: "abc-defg-hij" });
+  const events = [];
+  tr.ingest(0, []);
+  events.push(...tr.ingest(400, [B("Lan", "Hello")]));
+  events.push(...tr.ingest(800, [B("Lan", "Hello there")]));
+  assert.equal(events.length, 0);
+  events.push(...tr.ingest(2000, [B("Lan", "Hello there")]));
+  assert.deepEqual(events.map((e) => e.text), ["Hello there"]);
+});
+
+test("B3: the stream emits interim names by default and summarises counts (no names) for main.log", async () => {
+  let clock = 0;
+  const withKy = clone(ON);
+  const region = find(withKy, byName("Group", "Phụ đề"));
+  region.children.push({ type: "Text", name: "Hanh Nhi Ngo Xuan", children: [] }, { type: "Text", name: "short", children: [] });
+  const events = [];
+  const summaries = [];
+  const stream = new MeetCaptionStream({
+    sensor: { snapshot: async () => ({ found: true, root: withKy }), invoke: async () => ({ invoked: false }) },
+    emit: (e) => events.push(e),
+    onSummary: (s) => summaries.push(s),
+    summaryMs: 1000,
+    now: () => clock,
+    setTimer: () => null,
+    clearTimer: () => {},
+  });
+  stream.start("ffo-iwfp-dgw");
+  clock = 0;
+  await stream.tick();
+  assert.ok(events.length > 0, "a block is named on its first sighting, before it is stable");
+  clock = 1100;
+  await stream.tick();
+  assert.equal(summaries.length, 1);
+  const [s] = summaries;
+  assert.equal(s.meetCode, "ffo-iwfp-dgw");
+  assert.equal(s.state, "live");
+  assert.equal(s.captionsVisible, true);
+  assert.equal(s.reads, 2);
+  assert.equal(s.readsWithCaptions, 2);
+  assert.equal(s.events, events.length);
+  assert.ok(s.speakers >= 1);
+  assert.ok(!JSON.stringify(s).includes("Hanh"), "no speaker names in the log summary");
+  stream.stop();
+  assert.equal(summaries.length, 2, "a last summary on stop");
+});
