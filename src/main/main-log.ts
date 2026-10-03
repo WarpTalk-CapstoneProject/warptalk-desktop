@@ -205,6 +205,7 @@ export const IPC_LOGGED: ReadonlySet<string> = new Set([
   "bridge:unwatch-meet-presence",
   "bridge:arm-meet-window-capture",
   "bridge:ensure-meet-captions",
+  "bridge:meet-captions-stream",
   "bridge:install-virtual-audio",
   "bridge:align-hifi-format",
   "bridge:open-transcript-window",

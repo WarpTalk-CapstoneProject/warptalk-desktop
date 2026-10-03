@@ -303,7 +303,20 @@ const meetCaptionStream = new MeetCaptionStream({
   now: alignedNow,
   audioActive: () => loopbackCapturing,
   emit: (event) => meetCaptionBuffer.event(event),
-  emitStatus: (status) => meetCaptionBuffer.status(status),
+  emitStatus: (status) => {
+    // On change only (the stream dedupes statuses): whether the sensor could read the captions.
+    mainLog?.info("meet", "captions status", {
+      meetCode: status.meetCode,
+      running: status.running,
+      state: status.state,
+      captionsVisible: status.captionsVisible,
+      error: status.error,
+    });
+    meetCaptionBuffer.status(status);
+  },
+  // Counts only, once a minute: did names reach the renderer, and was it listening (bug B3).
+  onSummary: (summary) =>
+    mainLog?.info("meet", "captions summary", { ...summary, rendererSubscribed: meetCaptionBuffer.isSubscribed }),
 });
 const ensureMeetCaptionsOnce = singleFlight((meetCode) => ensureCaptionsOn(meetCaptionSensor, meetCode));
 
