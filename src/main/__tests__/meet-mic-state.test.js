@@ -5,7 +5,9 @@ import {
   MIC_SESSION_SENSOR_SCRIPT,
   MeetMicStateStream,
   classifyMicEndpoint,
+  classifySpeakerEndpoint,
   decideMeetMicState,
+  sameMeetMicState,
 } from "../meet-mic-state.ts";
 
 const BROWSER = 5000;
@@ -172,6 +174,105 @@ test("the helper script is pure ASCII and never sets a device", () => {
   }
 });
 
+// ---------------------------------------------------------------------------------------------
+// The speaker (render endpoints)
+// ---------------------------------------------------------------------------------------------
+
+const CABLE_IN = "CABLE Input (VB-Audio Virtual Cable)";
+const SPEAKERS = "Speakers (Realtek(R) Audio)";
+const HIFI_IN = "Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)";
+
+test("field 2026-10-03: Meet's speaker on CABLE Input reads as speaker cable", () => {
+  // Meet's mic on CABLE Output and its speaker on CABLE Input: the far side loops back into Meet's
+  // own microphone and the user hears nothing.
+  const state = decideMeetMicState(
+    {
+      endpoints: [endpoint(CABLE, [chromeSession()])],
+      render: [endpoint(CABLE_IN, [chromeSession()]), endpoint(SPEAKERS, [])],
+    },
+    CONTEXT,
+  );
+  assert.deepEqual(state, {
+    at: AT,
+    browserPid: BROWSER,
+    speaker: "cable",
+    speakerEndpoints: [CABLE_IN],
+    state: "cable",
+    endpoint: CABLE,
+    endpoints: [CABLE],
+  });
+});
+
+test("speaker on real speakers reads as real; on both, cable wins (that is the problem)", () => {
+  const real = decideMeetMicState(
+    { endpoints: [], render: [endpoint(CABLE_IN, []), endpoint(SPEAKERS, [chromeSession()])] },
+    CONTEXT,
+  );
+  assert.equal(real.speaker, "real");
+  assert.deepEqual(real.speakerEndpoints, [SPEAKERS]);
+  const both = decideMeetMicState(
+    { endpoints: [], render: [endpoint(CABLE_IN, [chromeSession()]), endpoint(SPEAKERS, [chromeSession()])] },
+    CONTEXT,
+  );
+  assert.equal(both.speaker, "cable");
+  assert.deepEqual(both.speakerEndpoints, [CABLE_IN, SPEAKERS]);
+});
+
+test("Hi-Fi Cable Input is never counted as CABLE Input", () => {
+  assert.equal(classifySpeakerEndpoint({ name: HIFI_IN, interfaceName: "VB-Audio Hi-Fi Cable" }), "other-virtual");
+  assert.equal(classifySpeakerEndpoint({ name: "Hi-Fi Cable Input" }), "other-virtual");
+  assert.equal(classifySpeakerEndpoint({ name: CABLE_IN, interfaceName: "VB-Audio Virtual Cable" }), "cable");
+  assert.equal(classifySpeakerEndpoint({ name: "CABLE Input" }), "cable");
+  // Renamed in Sound settings: VB-CABLE's interface name, on a render endpoint, is CABLE Input.
+  assert.equal(classifySpeakerEndpoint({ name: "Meet out", interfaceName: "VB-Audio Virtual Cable" }), "cable");
+  assert.equal(classifySpeakerEndpoint({ name: SPEAKERS, interfaceName: "Realtek(R) Audio" }), "real");
+  // The capture rule is not the render rule: CABLE Output is not a speaker name.
+  assert.equal(classifySpeakerEndpoint({ name: "CABLE Output" }), "other-virtual");
+
+  const state = decideMeetMicState({ endpoints: [], render: [endpoint(HIFI_IN, [chromeSession()])] }, CONTEXT);
+  assert.equal(state.speaker, "unknown");
+  assert.deepEqual(state.speakerEndpoints, [HIFI_IN]);
+});
+
+test("WarpTalk playing the dub into CABLE Input is not the browser's speaker", () => {
+  const state = decideMeetMicState(
+    { endpoints: [], render: [endpoint(CABLE_IN, [warptalkSession()]), endpoint(SPEAKERS, [chromeSession()])] },
+    CONTEXT,
+  );
+  assert.equal(state.speaker, "real");
+});
+
+test("speaker: inactive sessions, other browsers and an unreadable render side are not 'cable'", () => {
+  const inactive = decideMeetMicState({ endpoints: [], render: [endpoint(CABLE_IN, [chromeSession("inactive")])] }, CONTEXT);
+  assert.deepEqual({ speaker: inactive.speaker, listed: inactive.speakerEndpoints }, { speaker: "unknown", listed: undefined });
+  const otherBrowser = decideMeetMicState(
+    { endpoints: [], render: [endpoint(CABLE_IN, [chromeSession("active", 7100, 7000)])] },
+    CONTEXT,
+  );
+  assert.equal(otherBrowser.speaker, "unknown");
+  // The helper could not read the render side: the mic answer stands, the speaker is unknown.
+  const unread = decideMeetMicState({ endpoints: [endpoint(CABLE, [chromeSession()])], render: null }, CONTEXT);
+  assert.equal(unread.state, "cable");
+  assert.equal(unread.speaker, "unknown");
+  // An older helper that sends no render list at all: no speaker field, exactly as before.
+  const older = decideMeetMicState({ endpoints: [endpoint(CABLE, [chromeSession()])] }, CONTEXT);
+  assert.equal("speaker" in older, false);
+});
+
+test("a speaker change alone is a change of the payload", () => {
+  const a = decideMeetMicState({ endpoints: [endpoint(CABLE, [chromeSession()])], render: [endpoint(SPEAKERS, [chromeSession()])] }, CONTEXT);
+  const b = decideMeetMicState({ endpoints: [endpoint(CABLE, [chromeSession()])], render: [endpoint(CABLE_IN, [chromeSession()])] }, CONTEXT);
+  assert.equal(sameMeetMicState(a, a), true);
+  assert.equal(sameMeetMicState(a, b), false);
+});
+
+test("the helper reads render endpoints too, and a failed render read never fails the poll", () => {
+  assert.match(MIC_SESSION_SENSOR_SCRIPT, /Poll\(1\)/);
+  assert.match(MIC_SESSION_SENSOR_SCRIPT, /try \{ \$render = \[WarpTalkMicSessions\]::Poll\(0\) \} catch \{ \$render = 'null' \}/);
+  assert.match(MIC_SESSION_SENSOR_SCRIPT, /EnumAudioEndpoints\(flow, 1, out devices\)/);
+  assert.match(MIC_SESSION_SENSOR_SCRIPT, /"render":/);
+});
+
 function fakeTimers() {
   const pending = [];
   return {
@@ -247,5 +348,29 @@ test("a failed poll reports probe-failed once and backs off", async () => {
   await timers.fire();
   assert.equal(emitted.length, 1);
   assert.equal(timers.pending[0].ms, 8000);
+  stream.stop();
+});
+
+test("the stream emits when only the speaker changes", async () => {
+  const mic = [endpoint(CABLE, [chromeSession()])];
+  const snapshots = [
+    { endpoints: mic, render: [endpoint(SPEAKERS, [chromeSession()])] },
+    { endpoints: mic, render: [endpoint(CABLE_IN, [chromeSession()])] },
+  ];
+  const emitted = [];
+  const timers = fakeTimers();
+  const stream = new MeetMicStateStream({
+    sensor: { poll: async () => snapshots.shift(), stop: () => undefined },
+    emit: (state) => emitted.push(`${state.state}/${state.speaker}`),
+    browserPid: () => BROWSER,
+    excludePids: () => [WARPTALK],
+    now: () => AT,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+  stream.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  await timers.fire();
+  assert.deepEqual(emitted, ["cable/real", "cable/cable"]);
   stream.stop();
 });

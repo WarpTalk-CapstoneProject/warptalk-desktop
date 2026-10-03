@@ -405,6 +405,16 @@ export interface EnsureMeetCaptionsResult {
  *   real       active session(s) on physical microphones only
  *   ambiguous  active sessions on the cable AND on another endpoint
  *   unknown    no active session (Meet not capturing, possibly muted), or the probe failed
+ *
+ * `speaker` answers the same question for the browser's OUTPUT, from render endpoints (optional,
+ * absent on desktop builds that predate it and when the probe failed):
+ *   cable      an active browser session plays into "CABLE Input (VB-Audio Virtual Cable)" - alone
+ *              or beside another device. Meet's far side then comes back out of "CABLE Output"
+ *              (Meet's microphone in a voice bridge) and the user hears nothing of the call.
+ *              "Hi-Fi Cable Input" never counts as this.
+ *   real       active session(s) on physical speakers only
+ *   unknown    nothing playing (Chrome may stop its output in a silent call), only another virtual
+ *              device, or the render side could not be read
  */
 export interface MeetMicState {
   state: "cable" | "real" | "unknown" | "ambiguous";
@@ -419,6 +429,10 @@ export interface MeetMicState {
     | "other-virtual-device"
     | "probe-failed"
     | "unsupported-platform";
+  /** Where the browser plays to; see above. Optional and additive. */
+  speaker?: "cable" | "real" | "unknown";
+  /** Every render endpoint with an active browser session, for diagnostics. */
+  speakerEndpoints?: string[];
   /** Date.now() of the read. */
   at: number;
 }
@@ -502,7 +516,9 @@ export interface MeetWindowGeometry {
  * Core Audio cannot see mute - a muted Meet keeps the microphone open - so mute comes from here.
  *
  *   muted  true / false as Meet shows it; null when it is not known (never read, the call was
- *          left, or the button's name and class contradicted each other).
+ *          left, the button's name and class contradicted each other, or two surfaces of the same
+ *          call - a tab and a PiP window, two windows - disagreed). A CHANGE is reported only once
+ *          it has held for about a second over two reads; the first value of a meeting at once.
  *   stale  `muted` is the LAST value read, not a current one: Meet is out of sight (background
  *          tab without PiP), the read failed, or the window is minimized. Do not act on a stale
  *          value as if the user had just pressed the button.

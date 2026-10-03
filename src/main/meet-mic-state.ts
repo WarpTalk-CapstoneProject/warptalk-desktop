@@ -19,6 +19,13 @@
  *     muted user reads as "unknown", never as a wrong device.
  *   - WarpTalk's own processes are excluded (it records the real mic too in text-only mode).
  *
+ * SPEAKER, read the same way from RENDER endpoints: whether the Meet browser is playing into VB-CABLE's
+ * "CABLE Input". In the field (2026-10-03) a user had Meet's speaker on CABLE Input: the far side
+ * then plays into the cable, comes straight back out of "CABLE Output" - Meet's own microphone in a
+ * voice bridge - and the user hears nothing of the call. Same limits as above (per browser, Active
+ * sessions only, WarpTalk's own processes excluded - WarpTalk itself plays the dub into CABLE
+ * Input, which is exactly right and must not count).
+ *
  * The helper is one long-lived PowerShell process (same shape as meet-caption-sensor.ts) because
  * the C# below is compiled by Add-Type, which costs seconds: compiled once, then answered per line.
  * It is read-only: it enumerates endpoints and sessions and never sets anything.
@@ -33,6 +40,8 @@ import { matchesDeviceName } from "./virtual-audio.ts";
 import type { MeetMicState } from "../shared/types.ts";
 
 export const CABLE_OUTPUT_NAME = "CABLE Output (VB-Audio Virtual Cable)";
+/** VB-CABLE's render side: what is played here comes out of CABLE Output. */
+export const CABLE_INPUT_NAME = "CABLE Input (VB-Audio Virtual Cable)";
 /** The driver's interface name for VB-CABLE, which survives a user renaming the endpoint. */
 const CABLE_INTERFACE_NAME = "VB-Audio Virtual Cable";
 const BROWSER_IMAGES = new Set(["chrome", "msedge", "brave", "opera", "vivaldi", "firefox"]);
@@ -63,7 +72,13 @@ export interface MicEndpointRecord {
 }
 
 export interface MicSessionSnapshot {
+  /** Capture endpoints (microphones). */
   endpoints: MicEndpointRecord[];
+  /**
+   * Render endpoints (speakers), same shape. Null when the helper could not read them (the mic
+   * answer still stands); absent from an older helper.
+   */
+  render?: MicEndpointRecord[] | null;
 }
 
 export interface MeetMicDecisionContext {
@@ -83,6 +98,20 @@ export type MicEndpointKind = "cable" | "other-virtual" | "real";
  */
 export function classifyMicEndpoint(endpoint: Pick<MicEndpointRecord, "name" | "interfaceName">): MicEndpointKind {
   if (matchesDeviceName(endpoint.name, CABLE_OUTPUT_NAME)) return "cable";
+  if (endpoint.interfaceName?.trim().toLowerCase() === CABLE_INTERFACE_NAME.toLowerCase()) return "cable";
+  if (OTHER_VIRTUAL.test(endpoint.name) || OTHER_VIRTUAL.test(endpoint.interfaceName ?? "")) return "other-virtual";
+  return "real";
+}
+
+/**
+ * The same rules for a speaker. Exact for VB-CABLE's "CABLE Input": "Hi-Fi Cable Input (VB-Audio
+ * Hi-Fi Cable)" contains "Cable Input" and must never read as it. VB-CABLE's interface name is the
+ * same on both of its endpoints, so on a RENDER endpoint it identifies CABLE Input.
+ */
+export function classifySpeakerEndpoint(
+  endpoint: Pick<MicEndpointRecord, "name" | "interfaceName">,
+): MicEndpointKind {
+  if (matchesDeviceName(endpoint.name, CABLE_INPUT_NAME)) return "cable";
   if (endpoint.interfaceName?.trim().toLowerCase() === CABLE_INTERFACE_NAME.toLowerCase()) return "cable";
   if (OTHER_VIRTUAL.test(endpoint.name) || OTHER_VIRTUAL.test(endpoint.interfaceName ?? "")) return "other-virtual";
   return "real";
@@ -111,15 +140,16 @@ function sessionBrowserRoot(session: MicSessionRecord, context: MeetMicDecisionC
   return root;
 }
 
-/** The pure decision. See MeetMicState in shared/types.ts for what each state means. */
-export function decideMeetMicState(
-  snapshot: MicSessionSnapshot,
+/** Endpoints with an active session of the browser, by kind, and the browser roots seen. */
+function browserHits(
+  endpoints: readonly MicEndpointRecord[],
+  classify: (endpoint: MicEndpointRecord) => MicEndpointKind,
   context: MeetMicDecisionContext,
-): MeetMicState {
+  roots: Set<number>,
+): Map<MicEndpointKind, string[]> {
   const hits = new Map<MicEndpointKind, string[]>();
-  const roots = new Set<number>();
-  for (const endpoint of snapshot.endpoints) {
-    const kind = classifyMicEndpoint(endpoint);
+  for (const endpoint of endpoints) {
+    const kind = classify(endpoint);
     for (const session of endpoint.sessions) {
       if (session.state !== "active" || session.pid <= 0) continue;
       const root = sessionBrowserRoot(session, context);
@@ -130,10 +160,45 @@ export function decideMeetMicState(
       hits.set(kind, names);
     }
   }
+  return hits;
+}
+
+/**
+ * Where the browser plays to. "cable" as soon as ANY active browser session renders into CABLE
+ * Input, even alongside a real speaker: whatever goes in there comes back out of Meet's microphone,
+ * and the banner is about exactly that. "real" when only physical (or unrecognised non-VB) devices
+ * are played to. "unknown" otherwise: nothing playing (Chrome may close its output stream in a
+ * silent call), only another virtual device (Hi-Fi Cable Input is the inbound leg on some
+ * setups), or the render side could not be read.
+ */
+function decideSpeaker(
+  render: readonly MicEndpointRecord[] | null | undefined,
+  context: MeetMicDecisionContext,
+): Pick<MeetMicState, "speaker" | "speakerEndpoints"> {
+  if (!Array.isArray(render)) return { speaker: "unknown" };
+  const hits = browserHits(render, classifySpeakerEndpoint, context, new Set<number>());
+  const cable = hits.get("cable") ?? [];
+  const real = hits.get("real") ?? [];
+  const other = hits.get("other-virtual") ?? [];
+  const speakerEndpoints = [...cable, ...real, ...other];
+  const listed = speakerEndpoints.length > 0 ? { speakerEndpoints } : {};
+  if (cable.length > 0) return { speaker: "cable", ...listed };
+  if (real.length > 0) return { speaker: "real", ...listed };
+  return { speaker: "unknown", ...listed };
+}
+
+/** The pure decision. See MeetMicState in shared/types.ts for what each state means. */
+export function decideMeetMicState(
+  snapshot: MicSessionSnapshot,
+  context: MeetMicDecisionContext,
+): MeetMicState {
+  const roots = new Set<number>();
+  const hits = browserHits(snapshot.endpoints, classifyMicEndpoint, context, roots);
+  const speaker = snapshot.render === undefined ? {} : decideSpeaker(snapshot.render, context);
 
   const browserPid =
     context.browserPid && context.browserPid > 0 ? context.browserPid : roots.size === 1 ? [...roots][0] : undefined;
-  const base = { at: context.at, ...(browserPid ? { browserPid } : {}) };
+  const base = { at: context.at, ...(browserPid ? { browserPid } : {}), ...speaker };
   const cable = hits.get("cable") ?? [];
   const real = hits.get("real") ?? [];
   const other = hits.get("other-virtual") ?? [];
@@ -154,7 +219,9 @@ export function sameMeetMicState(a: MeetMicState | null, b: MeetMicState): boole
     a.browserPid === b.browserPid &&
     a.endpoint === b.endpoint &&
     a.reason === b.reason &&
-    (a.endpoints ?? []).join("\u0000") === (b.endpoints ?? []).join("\u0000")
+    (a.endpoints ?? []).join("\u0000") === (b.endpoints ?? []).join("\u0000") &&
+    a.speaker === b.speaker &&
+    (a.speakerEndpoints ?? []).join("\u0000") === (b.speakerEndpoints ?? []).join("\u0000")
   );
 }
 
@@ -305,14 +372,15 @@ public static class WarpTalkMicSessions {
     return b.Append(']').ToString();
   }
 
-  public static string Poll() {
+  // flow: 1 = capture (eCapture), 0 = render (eRender). Only ACTIVE endpoints (state mask 1).
+  public static string Poll(int flow) {
     var enumerator = (IWtMMDeviceEnumerator)new WtMMDeviceEnumeratorComObject();
     var procs = Processes();
     string defaultId = null;
     IWtMMDevice def;
-    if (enumerator.GetDefaultAudioEndpoint(1, 0, out def) == 0 && def != null) { def.GetId(out defaultId); }
+    if (enumerator.GetDefaultAudioEndpoint(flow, 0, out def) == 0 && def != null) { def.GetId(out defaultId); }
     IWtMMDeviceCollection devices;
-    int hr = enumerator.EnumAudioEndpoints(1, 1, out devices);
+    int hr = enumerator.EnumAudioEndpoints(flow, 1, out devices);
     if (hr != 0) throw new Exception("EnumAudioEndpoints 0x" + hr.ToString("X8"));
     int count; devices.GetCount(out count);
     var b = new StringBuilder("[");
@@ -364,7 +432,13 @@ while ($true) {
   $id = $parts[1]
   if ($id -notmatch '^[0-9]+$') { continue }
   try {
-    if ($parts[0] -eq 'poll') { $json = '{"id":"' + $id + '","ok":true,"endpoints":' + [WarpTalkMicSessions]::Poll() + '}' }
+    if ($parts[0] -eq 'poll') {
+      $capture = [WarpTalkMicSessions]::Poll(1)
+      # The speaker read must never cost the mic answer: on any failure it is reported as null.
+      $render = 'null'
+      try { $render = [WarpTalkMicSessions]::Poll(0) } catch { $render = 'null' }
+      $json = '{"id":"' + $id + '","ok":true,"endpoints":' + $capture + ',"render":' + $render + '}'
+    }
     else { $json = '{"id":"' + $id + '","ok":false,"error":"bad-command"}' }
   } catch {
     $msg = ($_.Exception.Message -replace '[\\"]', "'") -replace '[\r\n]', ' '
@@ -379,7 +453,9 @@ const POLL_TIMEOUT_MS = 5000;
 /** Added to the first poll of a fresh helper: PowerShell start plus the Add-Type compile. */
 const STARTUP_ALLOWANCE_MS = 15000;
 
-type Reply = { id: string; ok: true; endpoints: MicEndpointRecord[] } | { id: string; ok: false; error: string };
+type Reply =
+  | { id: string; ok: true; endpoints: MicEndpointRecord[]; render?: MicEndpointRecord[] | null }
+  | { id: string; ok: false; error: string };
 
 export interface MicSessionSensorLike {
   poll(): Promise<MicSessionSnapshot>;
@@ -461,7 +537,11 @@ export class MicSessionSensor implements MicSessionSensorLike {
           clearTimeout(timer);
           if (reply === null) reject(new Error("The mic session sensor exited."));
           else if (!reply.ok) reject(new Error(reply.error));
-          else resolve({ endpoints: Array.isArray(reply.endpoints) ? reply.endpoints : [] });
+          else
+            resolve({
+              endpoints: Array.isArray(reply.endpoints) ? reply.endpoints : [],
+              render: Array.isArray(reply.render) ? reply.render : null,
+            });
         });
         child.stdin.write(`poll ${id}\n`);
       });
