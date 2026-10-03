@@ -268,16 +268,28 @@ export function instrumentIpc(ipc: IpcMainLike, log: MainLog, clock: () => numbe
 }
 
 /**
- * Whether a line the web UI printed is kept: warnings and errors only. Its info chatter is large,
- * and what main needs from the renderer is the moment something went wrong.
+ * Whether a line the web UI printed is kept: warnings and errors, plus the web app's own bridge
+ * diagnostics at info level. Its other info chatter is large, and what main needs from the
+ * renderer is the moment something went wrong - and, for a bridge meeting, why the WarpTalk mic
+ * and capture did what they did: the web app prints those decisions (Meet mic follow, routing)
+ * with the "[bridge]" prefix, and without them a field log shows the desktop's readings but not
+ * what the web made of them. They go through the same redaction and repeat-collapsing as any line.
  *
  * Electron has reported the level both as a number (0 verbose, 1 info, 2 warning, 3 error) and, in
  * newer versions, as a word; both are read.
  */
-export function rendererConsoleLevel(level: unknown): MainLogLevel | null {
+export function rendererConsoleLevel(level: unknown, message?: unknown): MainLogLevel | null {
   if (level === 3 || level === "error") return "error";
   if (level === 2 || level === "warning") return "warn";
+  if ((level === 1 || level === "info") && isBridgeDiagnostic(message)) return "info";
   return null;
+}
+
+/** The web app's bridge diagnostics: a console line that starts with "[bridge]". */
+export const RENDERER_INFO_PREFIX = "[bridge]";
+
+function isBridgeDiagnostic(message: unknown): boolean {
+  return typeof message === "string" && message.trimStart().startsWith(RENDERER_INFO_PREFIX);
 }
 
 /** A page address as it may be logged: origin and path, never the query or fragment. */

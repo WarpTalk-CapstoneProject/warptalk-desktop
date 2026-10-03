@@ -183,9 +183,14 @@ const meetCallTracker = new MeetCallStateTracker({
     sendToWindows([mainWindow, transcriptPanel.window], "bridge:meet-call-state", state);
     observeMeetForCaptureGuard();
   },
-  emitSelfMic: (mic) => {
-    mainLog?.info("meet", "self mic", mic);
+  emitSelfMic: (mic, evidence) => {
+    // The renderer gets `mic` only; main.log also gets what the deciding read saw (Meet's button
+    // label and class - UI strings, never caption or transcript text).
+    mainLog?.info("meet", "self mic", evidence ? { ...mic, read: evidence } : mic);
     sendToWindows([mainWindow, transcriptPanel.window], "bridge:meet-self-mic", mic);
+  },
+  onMicRead: (read) => {
+    mainLog?.info("meet", "self mic read", read);
   },
 });
 // The sensor picks its sighting's window with the tracker's own tie-break, so presence and the call
@@ -337,7 +342,11 @@ const meetMicStream = new MeetMicStateStream({
   // Our own tree is excluded by ancestry anyway; the metrics list also covers any helper Electron
   // reparented.
   excludePids: () => [process.pid, ...app.getAppMetrics().map((metric) => metric.pid)],
-  emit: (state) => sendMeetMicState(state),
+  emit: (state) => {
+    // Emitted only on a change. Device names and states only - nothing the user said.
+    mainLog?.info("meet", "mic state", state);
+    sendMeetMicState(state);
+  },
 });
 
 function sendMeetMicState(state: MeetMicState, only?: Electron.WebContents): void {
@@ -1832,9 +1841,9 @@ function logWebContents(contents: Electron.WebContents): void {
   contents.on("console-message", (event, ...legacy: unknown[]) => {
     // Electron 35+ puts the details on the event; older versions passed them as arguments.
     const details = event as unknown as { level?: unknown; message?: unknown };
-    const level = rendererConsoleLevel(details.level ?? legacy[0]);
-    if (!level) return;
     const message = typeof details.message === "string" ? details.message : String(legacy[1] ?? "");
+    const level = rendererConsoleLevel(details.level ?? legacy[0], message);
+    if (!level) return;
     log[level]("renderer", `${windowLabel(contents)}: ${message}`);
   });
 }

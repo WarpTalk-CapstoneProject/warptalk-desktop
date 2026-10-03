@@ -204,6 +204,37 @@ test("only the renderer's warnings and errors are kept, in either form Electron 
   assert.equal(rendererConsoleLevel(undefined), null);
 });
 
+test("the web app's [bridge] diagnostics are kept at info level; other info chatter is not", () => {
+  assert.equal(rendererConsoleLevel(1, "[bridge] mic follows Meet: muted=false"), "info");
+  assert.equal(rendererConsoleLevel("info", "[bridge] route"), "info");
+  assert.equal(rendererConsoleLevel(1, "  [bridge] leading space"), "info");
+  // Only a prefix counts, and only at info level: verbose stays out.
+  assert.equal(rendererConsoleLevel(1, "chatter about [bridge] in the middle"), null);
+  assert.equal(rendererConsoleLevel(1, "[bridgehead] not the prefix"), null);
+  assert.equal(rendererConsoleLevel(0, "[bridge] verbose"), null);
+  assert.equal(rendererConsoleLevel("verbose", "[bridge] verbose"), null);
+  assert.equal(rendererConsoleLevel(1, undefined), null);
+  assert.equal(rendererConsoleLevel(1, { toString: () => "[bridge] x" }), null);
+  // Warnings and errors are unchanged, whatever the text.
+  assert.equal(rendererConsoleLevel(2, "[bridge] x"), "warn");
+  assert.equal(rendererConsoleLevel(3, "x"), "error");
+});
+
+test("a kept [bridge] line is still redacted and still collapsed when it repeats", () => {
+  const file = tempLog();
+  const log = createMainLog(file, { now: () => AT });
+  const message = "main: [bridge] reconnect https://app.warptalk.io.vn/r/1?token=abc access_token=zzzzzzzz";
+  const level = rendererConsoleLevel(1, "[bridge] reconnect");
+  log[level]("renderer", message);
+  log[level]("renderer", message);
+  log.info("renderer", "main: [bridge] next");
+  const written = lines(file);
+  assert.equal(written.length, 3, written.join("\n"));
+  assert.doesNotMatch(written[0], /abc|zzzzzzzz/);
+  assert.match(written[0], /\[info\] \[renderer\] main: \[bridge\] reconnect/);
+  assert.match(written[1], /last line repeated 1 more time/);
+});
+
 test("a page address is logged without its query or fragment", () => {
   assert.equal(
     loggableUrl("https://app.warptalk.io.vn/ws/rooms/abc?token=x#y"),

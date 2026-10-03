@@ -55,6 +55,14 @@
  *   capture while the user was still in the call. A Meet tab that is really gone is not this
  *   module's to say: the address leaves the screen and presence (meet-presence.ts) reports it.
  *
+ * HARDENED AFTER A FIELD LOG (2026-10-03, desktop 0.4.11, vi UI): the self-mic answer flapped
+ *   muted/unmuted/muted within 2.2 s and was applied to the WarpTalk mic each time. Since then:
+ *   the LABEL decides and the class may only confirm it (see `findMicButton`); a contradiction,
+ *   two disagreeing surfaces of one call, or a position-tier pick outside the call controls is
+ *   `unknown` (the web keeps its last applied value), never "muted"; a changed mute must hold
+ *   about a second over two reads before it is reported (`DEFAULT_MIC_HOLD_MS`); and main.log
+ *   records what each decision was read from (`MeetSelfMicRead`).
+ *
  * A TRAP THE DUMPS SHOWED: `aLTxue` / `Y3DJRd` ARE NOT THE MIC'S OWN
  *   The camera button carries the very same tokens as the mic (and share-screen, CC, raise-hand
  *   carry `aLTxue` too). So the tokens give the STATE of a toggle, never WHICH toggle it is. The
@@ -258,44 +266,101 @@ interface MicFinding {
   /** Null when the button was found but its state could not be decided (see below). */
   muted: boolean | null;
   via: "class" | "name" | null;
+  evidence: MeetSelfMicEvidence;
+}
+
+/** At most this much of a label or class string goes into main.log. */
+const EVIDENCE_TEXT_MAX = 120;
+
+function clip(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > EVIDENCE_TEXT_MAX ? `${flat.slice(0, EVIDENCE_TEXT_MAX)}...` : flat;
+}
+
+function evidenceFor(
+  rule: MeetSelfMicRule,
+  button: MeetButton | null,
+  extra: Partial<MeetSelfMicEvidence> = {},
+): MeetSelfMicEvidence {
+  return {
+    rule,
+    label: button ? clip(button.n) : null,
+    byLabel: button ? micStateByName(button) : null,
+    byClass: button ? toggleStateByClass(button) : null,
+    classes: button ? clip(button.c) : null,
+    micLabelled: 0,
+    ...extra,
+  };
+}
+
+/** The call-control family: the first class token of Meet's Leave button, when there is one. */
+function callControlFamily(buttons: MeetButton[]): string | null {
+  const leave = buttons.find((b) => !isInjected(b) && tokensOf(b).includes(LEAVE_TOKEN));
+  return leave ? (tokensOf(leave)[0] ?? null) : null;
 }
 
 /**
  * Meet's own microphone button, and what it says.
  *
- * BY NAME FIRST. Where the language is known the name identifies the button for certain, and the
- * class then gives the state:
- *   name and class agree     -> the answer, `via: "class"` (the primary tier, confirmed)
- *   class says nothing       -> the name's answer, `via: "name"` (Meet renamed its classes)
- *   name and class DISAGREE  -> `muted: null`. One of the two has changed meaning and nothing here
- *                               can tell which; saying so beats muting someone on a coin toss.
+ * WHAT CAN BE READ. Through UI Automation, Meet's mic button exposes its accessible name and its
+ * class, nothing else: no TogglePattern (so Meet sets no aria-pressed on it - Chrome would expose
+ * one), and `data-is-muted` is a data attribute, which never reaches the accessibility tree. The
+ * most authoritative signal left is therefore the LABEL: it is the action Meet will perform and
+ * what a screen reader announces, and Meet rewrites it on every toggle. The class tokens are
+ * styling - `aLTxue` sits on half the toolbar, `Y3DJRd` on any red toggle - so they only ever
+ * confirm the label, or stand in for it where the language is unknown.
  *
- * BY POSITION OTHERWISE (a language the vocabulary does not hold). The tokens alone cannot find
- * the mic - the camera carries the same ones - so this takes the first button in document order
- * with exactly one of the two toggle tokens, which is the mic in every dump taken. It refuses when
- * that button is named as the camera. What it cannot refuse: an unknown-language page that shows
- * a camera toggle and no mic toggle at all would have the camera read as the mic. Meet has not
- * been seen to render that; stated here so nobody assumes it cannot happen.
+ * BY LABEL FIRST. Where the language is known the label identifies the button for certain, and
+ * gives its state:
+ *   label, class agrees       -> the answer, `via: "class"` (both tiers, confirmed)
+ *   label, class says nothing -> the label's answer, `via: "name"` (Meet renamed its classes)
+ *   label, class DISAGREES    -> `muted: null`. One of the two changed meaning (or the tree was
+ *                                caught mid-update) and nothing here can tell which; an unknown
+ *                                leaves the WarpTalk mic where it is, a wrong "muted" silences it.
+ *   two mic labels disagree   -> `muted: null`, for the same reason.
+ *
+ * BY POSITION OTHERWISE (a language the vocabulary does not hold, or a label Meet has not been
+ * seen to use). The tokens alone cannot find the mic - the camera carries the same ones - so this
+ * takes the first button in document order with exactly one of the two toggle tokens, which is
+ * the mic in every dump taken. It refuses when that button is named as the camera, and when it is
+ * not of the call-control family (the Leave button's first class token, when Leave is on screen):
+ * the people panel and the video tiles come BEFORE the toolbar in document order, and a red
+ * button there must not read as "you are muted". What it cannot refuse: an unknown-language page
+ * that shows a camera toggle and no mic toggle at all would have the camera read as the mic. Meet
+ * has not been seen to render that; stated here so nobody assumes it cannot happen.
  */
 function findMicButton(buttons: MeetButton[]): MicFinding | null {
   const meets = buttons.filter((b) => !isInjected(b));
 
   const named = meets.filter((b) => micStateByName(b) !== null);
   if (named.length > 0) {
+    const micLabelled = named.length;
     const byName = new Set(named.map((b) => micStateByName(b)));
     // Two mic buttons that disagree with each other: the button exists, its state is not known.
-    if (byName.size > 1) return { muted: null, via: null };
+    if (byName.size > 1) {
+      return { muted: null, via: null, evidence: evidenceFor("labels-conflict", named[0], { micLabelled }) };
+    }
     const nameState = [...byName][0] as "on" | "off";
     const classStates = new Set(named.map((b) => toggleStateByClass(b)).filter((s) => s !== null));
-    if (classStates.size === 0) return { muted: nameState === "off", via: "name" };
-    if (classStates.size === 1 && classStates.has(nameState)) return { muted: nameState === "off", via: "class" };
-    return { muted: null, via: null };
+    // The button the answer is read from, for the log: the one whose class spoke, if any did.
+    const shown = named.find((b) => toggleStateByClass(b) !== null) ?? named[0];
+    if (classStates.size === 0) {
+      return { muted: nameState === "off", via: "name", evidence: evidenceFor("label", shown, { micLabelled }) };
+    }
+    if (classStates.size === 1 && classStates.has(nameState)) {
+      return { muted: nameState === "off", via: "class", evidence: evidenceFor("label+class", shown, { micLabelled }) };
+    }
+    return { muted: null, via: null, evidence: evidenceFor("label-class-conflict", shown, { micLabelled }) };
   }
 
   const first = meets.find((b) => toggleStateByClass(b) !== null);
   if (!first) return null;
   if (CAMERA_NAMES.has(normalizeLabel(first.n))) return null;
-  return { muted: toggleStateByClass(first) === "off", via: "class" };
+  const family = callControlFamily(meets);
+  if (family !== null && tokensOf(first)[0] !== family) {
+    return { muted: null, via: null, evidence: evidenceFor("position-not-call-control", first) };
+  }
+  return { muted: toggleStateByClass(first) === "off", via: "class", evidence: evidenceFor("position", first) };
 }
 
 /**
@@ -368,11 +433,55 @@ export interface MeetSelfMicReading {
   via: "class" | "name" | null;
 }
 
+/**
+ * Which rule produced (or refused) a mic reading. For main.log only.
+ *   label+class                label and class agree
+ *   label                      label only; the class carried neither toggle token
+ *   label-class-conflict       label and class disagree -> unknown
+ *   labels-conflict            two buttons with mic labels disagree -> unknown
+ *   position                   no known label; first toggle-styled call control
+ *   position-not-call-control  no known label; the first toggle-styled button is not a call control
+ *   surfaces-conflict          two surfaces of the same call disagree -> unknown
+ *   none                       no mic button found at all
+ */
+export type MeetSelfMicRule =
+  | "label+class"
+  | "label"
+  | "label-class-conflict"
+  | "labels-conflict"
+  | "position"
+  | "position-not-call-control"
+  | "surfaces-conflict"
+  | "none";
+
+/**
+ * What the mic reading was taken from, so the next field log can say WHY it read muted. Holds
+ * Meet's own UI strings (the button's accessible name and class), never caption or transcript
+ * text; both are clipped.
+ */
+export interface MeetSelfMicEvidence {
+  rule: MeetSelfMicRule;
+  /** The accessible name of the button the answer was read from, as Meet exposed it. */
+  label: string | null;
+  /** What the label says: "on" = "Turn off microphone" (mic live), "off" = muted. */
+  byLabel: "on" | "off" | null;
+  /** What the class's toggle tokens say. */
+  byClass: "on" | "off" | null;
+  classes: string | null;
+  /** How many buttons carried a microphone label (more than one is worth knowing about). */
+  micLabelled: number;
+  /** With more than one surface of the same call: each one's reading, e.g. ["tab:on", "pip:off"]. */
+  surfaces?: string[];
+  minimized?: boolean;
+}
+
 export interface MeetCallClassification {
   call: MeetCallReading;
   mic: MeetSelfMicReading;
   /** The surface the answer came from; null when there was none. */
   surface: MeetSurface | null;
+  /** How `mic` was decided. Diagnostics only; absent when nothing resembling a mic was seen. */
+  micEvidence?: MeetSelfMicEvidence;
 }
 
 const NO_MIC: MeetSelfMicReading = { muted: null, stale: false, via: null };
@@ -407,6 +516,7 @@ export function classifyMeetSurface(surface: MeetSurface): MeetCallClassificatio
       { muted: mic.muted, stale: mic.muted !== null && surface.minimized === true, via: mic.muted === null ? null : mic.via }
     : NO_MIC;
   const windowHandle = surface.windowHandle;
+  const micEvidence = mic ? { ...mic.evidence, ...(surface.minimized ? { minimized: true } : {}) } : undefined;
   const reading = (phase: MeetCallPhase, reason: string): MeetCallReading => ({
     phase,
     via: surface.surface,
@@ -417,15 +527,21 @@ export function classifyMeetSurface(surface: MeetSurface): MeetCallClassificatio
     ...(surface.surface === "tab" && isWindowHandle(windowHandle) ? { windowHandle } : {}),
     ...(surface.surface === "tab" && surface.geometry ? { windowGeometry: surface.geometry } : {}),
   });
+  const withMic = (call: MeetCallReading): MeetCallClassification => ({
+    call,
+    mic: micReading,
+    surface,
+    ...(micEvidence ? { micEvidence } : {}),
+  });
 
   if (surface.surface === "pip") {
-    if (leave) return { call: reading("in-call", `leave-button-${leave.via}`), mic: micReading, surface };
-    if (mic) return { call: reading("in-call", "pip-mic-button"), mic: micReading, surface };
+    if (leave) return withMic(reading("in-call", `leave-button-${leave.via}`));
+    if (mic) return withMic(reading("in-call", "pip-mic-button"));
     return { call: reading("unknown", "pip-without-controls"), mic: NO_MIC, surface };
   }
 
-  if (leave) return { call: reading("in-call", `leave-button-${leave.via}`), mic: micReading, surface };
-  if (mic) return { call: reading("lobby", "mic-button-no-leave"), mic: micReading, surface };
+  if (leave) return withMic(reading("in-call", `leave-button-${leave.via}`));
+  if (mic) return withMic(reading("lobby", "mic-button-no-leave"));
   if (buttons.length === 0) return { call: reading("unknown", "empty-tree"), mic: NO_MIC, surface };
   // A listing cut short may have lost the very buttons being looked for.
   if (surface.truncated) return { call: reading("unknown", "listing-truncated"), mic: NO_MIC, surface };
@@ -455,10 +571,12 @@ export function classifyMeetCall(
   options: { preferWindowHandle?: number | null } = {},
 ): MeetCallClassification {
   let best: MeetCallClassification | null = null;
+  const all: MeetCallClassification[] = [];
   const prefer = isWindowHandle(options.preferWindowHandle) ? options.preferWindowHandle : null;
   const ordered = [...surfaces].sort((a, b) => Number(a.surface === "pip") - Number(b.surface === "pip"));
   for (const surface of ordered) {
     const next = classifyMeetSurface(surface);
+    all.push(next);
     if (!best || PHASE_RANK[next.call.phase] > PHASE_RANK[best.call.phase]) {
       best = next;
     } else if (
@@ -470,12 +588,41 @@ export function classifyMeetCall(
       best = next;
     }
   }
-  if (best) return best;
+  if (best) return reconcileMic(best, all);
   return {
     call: { phase: "unknown", via: null, meetCode: null, reason: "no-meet-surface" },
     mic: NO_MIC,
     surface: null,
   };
+}
+
+/**
+ * The mic of a call seen on more than one surface - a tab plus a picture-in-picture window, or the
+ * same meeting open in two browser windows. The phase rule above picks ONE surface (tab before
+ * PiP, then the window already reported, then window order), and which one is not a statement
+ * about the user's mic: the presence look enumerates windows in z-order, the fast read re-reads
+ * them in the order of the previous look, and the sticky window only holds while it stays a
+ * candidate. When two surfaces of the same call disagree, taking the chosen one's mic would flip
+ * the answer with focus and cadence - a sub-second muted/unmuted flap. Disagreement is therefore
+ * `unknown`, and a chosen surface whose mic could not be read borrows the agreeing answer of
+ * another. The call reading (phase, window, geometry) is left exactly as chosen.
+ */
+function reconcileMic(best: MeetCallClassification, all: MeetCallClassification[]): MeetCallClassification {
+  const peers = all.filter(
+    (c) => c.call.phase === best.call.phase && c.call.meetCode === best.call.meetCode && c.micEvidence !== undefined,
+  );
+  if (peers.length < 2) return best;
+  const surfaces = peers.map((c) => `${c.surface?.surface ?? "?"}:${c.mic.muted === null ? "?" : c.mic.muted ? "off" : "on"}`);
+  const states = new Set(peers.map((c) => c.mic.muted).filter((m) => m !== null));
+  if (states.size > 1) {
+    const evidence = { ...(best.micEvidence as MeetSelfMicEvidence), rule: "surfaces-conflict" as const, surfaces };
+    return { ...best, mic: NO_MIC, micEvidence: evidence };
+  }
+  if (best.mic.muted === null && states.size === 1) {
+    const donor = peers.find((c) => c.mic.muted !== null) as MeetCallClassification;
+    return { ...best, mic: donor.mic, micEvidence: { ...(donor.micEvidence as MeetSelfMicEvidence), surfaces } };
+  }
+  return { ...best, micEvidence: { ...(best.micEvidence as MeetSelfMicEvidence), surfaces } };
 }
 
 /**
@@ -698,8 +845,19 @@ export interface MeetCallStateTrackerOptions {
   probe: (() => Promise<MeetSurface[]>) | null;
   /** Called only when the call state changed. */
   emitCallState: (state: MeetCallState) => void;
-  /** Called only when the mic reading changed. */
-  emitSelfMic: (mic: MeetSelfMic) => void;
+  /**
+   * Called only when the mic reading changed. `evidence` is what the read that settled it saw
+   * (absent when nothing was read): for main.log, not for the renderer.
+   */
+  emitSelfMic: (mic: MeetSelfMic, evidence?: MeetSelfMicRead) => void;
+  /**
+   * Called when what the sensor SEES about the mic changes, whether or not that changes the
+   * answer: a toggle now held for confirmation, a contradiction, a flap that was dropped. Optional;
+   * main.log only. Nothing is reported while the same evidence repeats.
+   */
+  onMicRead?: (read: MeetSelfMicRead) => void;
+  /** How long a changed mute must hold, over two reads or more, before it is reported. */
+  micHoldMs?: number;
   now?: () => number;
   /** The fast loop's gap between reads. */
   intervalMs?: number;
@@ -728,6 +886,34 @@ const DEFAULT_INTERVAL_MS = 1000;
  * land within milliseconds of each other.
  */
 const DEFAULT_CONFIRM_MS = 1500;
+
+/**
+ * A changed mute is believed once it has held this long, over two reads at least. The first value
+ * of a meeting is believed at once (it is not a change: nothing was applied before it).
+ *
+ * WHY: a field log (desktop 0.4.11, 2026-10-03) shows Meet's mic reported muted, unmuted and muted
+ * again within 2.2 s (09:20:12.539 / 12.975 / 14.731). Two answers 436 ms apart can only come from
+ * the two cadences (the 3 s presence look and the 1 s fast read) disagreeing, and each answer was
+ * applied to the WarpTalk mic at once. A real click in Meet holds; a tree caught mid-update, or two
+ * surfaces read in a different order, does not. The cost is up to one more read of latency on a
+ * real mute (about 1-2 s instead of about 1 s).
+ */
+const DEFAULT_MIC_HOLD_MS = 1000;
+
+/** One read's worth of mic evidence, as main.log gets it. */
+export interface MeetSelfMicRead extends Partial<MeetSelfMicEvidence> {
+  /** What this read alone says. */
+  muted: boolean | null;
+  phase: MeetCallPhase;
+  surface: "tab" | "pip" | null;
+  /**
+   *   applied   the answer (or an unchanged answer) was taken
+   *   held      a changed mute, waiting to hold for micHoldMs
+   *   dropped   a held change that did not last (the flap this exists for)
+   *   unknown   nothing decidable; the last value is kept, marked stale
+   */
+  outcome: "applied" | "held" | "dropped" | "unknown";
+}
 const CONFIRM_READS: Record<MeetCallPhase, number> = { "in-call": 1, lobby: 1, left: 2, unknown: 2 };
 
 /**
@@ -770,6 +956,9 @@ export class MeetCallStateTracker {
   private call: MeetCallState;
   private mic: MeetSelfMic;
   private candidate: { phase: MeetCallPhase; reads: number; sinceMs: number } | null = null;
+  /** A changed mute waiting to hold (see DEFAULT_MIC_HOLD_MS). */
+  private micCandidate: { muted: boolean; meetCode: string | null; sinceMs: number } | null = null;
+  private lastReadKey = "";
   private polling = false;
   private timer: unknown = null;
   private generation = 0;
@@ -864,14 +1053,16 @@ export class MeetCallStateTracker {
   /** One look's worth of surfaces, from either cadence. */
   ingest(surfaces: MeetSurface[]): void {
     const atMs = this.now();
-    const { call, mic, surface } = classifyMeetCall(surfaces, { preferWindowHandle: this.lastTabWindowHandle });
+    const { call, mic, surface, micEvidence } = classifyMeetCall(surfaces, {
+      preferWindowHandle: this.lastTabWindowHandle,
+    });
     this.latest = {
       phase: call.phase,
       via: call.via,
       ...(isWindowHandle(call.windowHandle) ? { windowHandle: call.windowHandle } : {}),
       atMs,
     };
-    this.observe(this.withHeldGeometry(call, surface, atMs), mic);
+    this.observe(this.withHeldGeometry(call, surface, atMs), mic, micEvidence);
   }
 
   /**
@@ -926,12 +1117,11 @@ export class MeetCallStateTracker {
     this.timer = null;
   }
 
-  private observe(call: MeetCallReading, mic: MeetSelfMicReading): void {
+  private observe(call: MeetCallReading, mic: MeetSelfMicReading, evidence?: MeetSelfMicEvidence): void {
     if (call.phase === this.call.phase) {
-      // Same phase: details (tab -> pip, the mic) apply at once. This is the mute path, and it is
-      // why mute latency is one read rather than two.
+      // Same phase: details (tab -> pip) apply at once; the mic goes through its own hold.
       this.candidate = null;
-      this.commit(call, mic);
+      this.commit(call, mic, evidence);
       return;
     }
     const now = this.now();
@@ -942,12 +1132,16 @@ export class MeetCallStateTracker {
     }
     const needed = CONFIRM_READS[call.phase];
     const held = now - this.candidate.sinceMs >= (this.options.confirmMs ?? DEFAULT_CONFIRM_MS);
-    if (needed > 1 && (this.candidate.reads < needed || !held)) return;
+    if (needed > 1 && (this.candidate.reads < needed || !held)) {
+      // Not the call read before, and not yet believed either: a pending mute did not hold here.
+      this.micCandidate = null;
+      return;
+    }
     this.candidate = null;
-    this.commit(call, mic);
+    this.commit(call, mic, evidence);
   }
 
-  private commit(call: MeetCallReading, reading: MeetSelfMicReading): void {
+  private commit(call: MeetCallReading, reading: MeetSelfMicReading, evidence?: MeetSelfMicEvidence): void {
     const atMs = this.now();
     if (call.via === "tab") {
       if (isWindowHandle(call.windowHandle)) this.lastTabWindowHandle = call.windowHandle;
@@ -961,25 +1155,57 @@ export class MeetCallStateTracker {
     }
 
     const last = this.mic;
+    const sameMeetingAsLast = call.meetCode === null || last.meetCode === null || call.meetCode === last.meetCode;
+    let outcome: MeetSelfMicRead["outcome"] = "applied";
     let next: Omit<MeetSelfMic, "atMs">;
     if (call.phase === "left") {
       // The call is over: there is no mic to follow, and an old value must not be acted on.
+      this.micCandidate = null;
       next = { muted: null, stale: false, via: null, meetCode: call.meetCode };
-    } else if (reading.muted !== null) {
+    } else if (reading.muted !== null && (last.muted === null || !sameMeetingAsLast || reading.muted === last.muted)) {
+      // The first value of a meeting, or the value already applied: taken as it is.
+      if (this.micCandidate) outcome = "dropped";
+      this.micCandidate = null;
       next = { muted: reading.muted, stale: reading.stale, via: reading.via, meetCode: call.meetCode };
+    } else if (reading.muted !== null) {
+      // A change. Believed once it has held (DEFAULT_MIC_HOLD_MS); until then nothing moves.
+      const holdMs = this.options.micHoldMs ?? DEFAULT_MIC_HOLD_MS;
+      const pending = this.micCandidate;
+      if (!pending || pending.muted !== reading.muted || pending.meetCode !== call.meetCode) {
+        this.micCandidate = { muted: reading.muted, meetCode: call.meetCode, sinceMs: atMs };
+      }
+      const since = (this.micCandidate as { sinceMs: number }).sinceMs;
+      if (holdMs > 0 && atMs - since < holdMs) {
+        outcome = "held";
+        next = { muted: last.muted, stale: last.stale, via: last.via, meetCode: last.meetCode };
+      } else {
+        this.micCandidate = null;
+        next = { muted: reading.muted, stale: reading.stale, via: reading.via, meetCode: call.meetCode };
+      }
     } else {
+      // An unreadable or contradictory read breaks a pending change's streak.
+      if (this.micCandidate) outcome = "dropped";
+      else outcome = "unknown";
+      this.micCandidate = null;
       // Nothing readable now (Meet out of sight, or a mic button neither tier could decide). The
       // last value is kept and marked stale - but only for the same meeting: a mic state from one
       // call says nothing about the next.
-      const sameMeeting = call.meetCode === null || last.meetCode === null || call.meetCode === last.meetCode;
-      const muted = sameMeeting ? last.muted : null;
+      const muted = sameMeetingAsLast ? last.muted : null;
       next = {
         muted,
         stale: muted !== null,
         via: muted !== null ? last.via : null,
-        meetCode: call.meetCode ?? (sameMeeting ? last.meetCode : null),
+        meetCode: call.meetCode ?? (sameMeetingAsLast ? last.meetCode : null),
       };
     }
+    const read: MeetSelfMicRead = {
+      muted: reading.muted,
+      phase: call.phase,
+      surface: call.via,
+      ...(evidence ?? {}),
+      outcome,
+    };
+    this.reportRead(read);
     if (
       next.muted !== last.muted ||
       next.stale !== last.stale ||
@@ -987,7 +1213,29 @@ export class MeetCallStateTracker {
       next.meetCode !== last.meetCode
     ) {
       this.mic = { ...next, atMs };
-      this.options.emitSelfMic(this.mic);
+      this.options.emitSelfMic(this.mic, evidence ? read : undefined);
     }
+  }
+
+  /** Tells main.log what the sensor saw, once per change of what it saw. */
+  private reportRead(read: MeetSelfMicRead): void {
+    if (!this.options.onMicRead) return;
+    // Everything but the raw class string: Meet can add hover/focus tokens without meaning anything.
+    const key = JSON.stringify([
+      read.muted,
+      read.phase,
+      read.surface,
+      read.rule,
+      read.label,
+      read.byLabel,
+      read.byClass,
+      read.micLabelled,
+      read.surfaces,
+      read.minimized,
+      read.outcome,
+    ]);
+    if (key === this.lastReadKey) return;
+    this.lastReadKey = key;
+    this.options.onMicRead(read);
   }
 }
