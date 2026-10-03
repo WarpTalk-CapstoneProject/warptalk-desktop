@@ -125,25 +125,33 @@ test("geometry: content is checked against the VISIBLE window and always ends up
 
 const NOW = 100_000;
 const presence = (windowHandle, via = "document") => ({ windowHandle, via });
+/** The tracker's latest reading, agreeing with the committed `call`, read at `atMs`. */
+const agree = (call, atMs) => ({
+  phase: call.phase,
+  via: call.via,
+  ...(call.windowHandle !== undefined ? { windowHandle: call.windowHandle } : {}),
+  atMs,
+});
 
 test("arm: a fresh in-call tab reading names the window, and the PiP gate agrees with it", () => {
   // The Meet tab dragged into a new window: the tracker reads 5555, presence still 2222.
   const call = { phase: "in-call", via: "tab", windowHandle: 5555 };
-  assert.deepEqual(meetWindowForArm({ sighting: presence(2222), call, callReadAtMs: NOW - 800, nowMs: NOW }), {
+  assert.deepEqual(meetWindowForArm({ sighting: presence(2222), call, latest: agree(call, NOW - 800), nowMs: NOW }), {
     windowHandle: 5555,
     inPictureInPicture: false,
+    unsettled: false,
     source: "call-state",
   });
   // Dragged out of PiP back onto a tab: presence still says PiP, the fresh tracker says tab. Not refused.
   assert.equal(
-    meetWindowForArm({ sighting: presence(3333, "pip"), call, callReadAtMs: NOW - 800, nowMs: NOW }).inPictureInPicture,
+    meetWindowForArm({ sighting: presence(3333, "pip"), call, latest: agree(call, NOW - 800), nowMs: NOW }).inPictureInPicture,
     false,
   );
   // A fresh in-call PiP reading refuses, whatever presence says.
   const inPip = meetWindowForArm({
     sighting: presence(2222),
     call: { phase: "in-call", via: "pip" },
-    callReadAtMs: NOW - 800,
+    latest: agree({ phase: "in-call", via: "pip" }, NOW - 800),
     nowMs: NOW,
   });
   assert.equal(inPip.inPictureInPicture, true);
@@ -161,36 +169,71 @@ test("arm: unknown, lobby, left or a stale tracker fall back to presence for bot
     { phase: "in-call", via: "tab", windowHandle: 0 },
   ]) {
     assert.deepEqual(
-      meetWindowForArm({ sighting: presence(2222), call, callReadAtMs: fresh, nowMs: NOW }),
-      { windowHandle: 2222, inPictureInPicture: false, source: "presence" },
+      meetWindowForArm({ sighting: presence(2222), call, latest: agree(call, fresh), nowMs: NOW }),
+      { windowHandle: 2222, inPictureInPicture: false, unsettled: false, source: "presence" },
       JSON.stringify(call),
     );
   }
   // An in-call tab reading whose last read is too old, or that never read at all.
   const call = { phase: "in-call", via: "tab", windowHandle: 5555 };
   assert.equal(
-    meetWindowForArm({ sighting: presence(2222), call, callReadAtMs: NOW - CALL_READ_FRESH_MS - 1, nowMs: NOW }).windowHandle,
+    meetWindowForArm({ sighting: presence(2222), call, latest: agree(call, NOW - CALL_READ_FRESH_MS - 1), nowMs: NOW }).windowHandle,
     2222,
   );
-  assert.equal(meetWindowForArm({ sighting: presence(2222), call, callReadAtMs: null, nowMs: NOW }).windowHandle, 2222);
+  assert.equal(meetWindowForArm({ sighting: presence(2222), call, latest: null, nowMs: NOW }).windowHandle, 2222);
   // Presence on PiP refuses; so does a tracker that last said PiP, even a stale one (B18).
   assert.equal(
-    meetWindowForArm({ sighting: presence(3333, "pip"), call: { phase: "unknown", via: null }, callReadAtMs: fresh, nowMs: NOW })
+    meetWindowForArm({ sighting: presence(3333, "pip"), call: { phase: "unknown", via: null }, latest: agree({ phase: "unknown", via: null }, fresh), nowMs: NOW })
       .inPictureInPicture,
     true,
   );
   assert.equal(
-    meetWindowForArm({ sighting: presence(2222), call: { phase: "in-call", via: "pip" }, callReadAtMs: null, nowMs: NOW })
+    meetWindowForArm({ sighting: presence(2222), call: { phase: "in-call", via: "pip" }, latest: null, nowMs: NOW })
       .inPictureInPicture,
     true,
   );
   // No handle anywhere, or a bad one.
-  assert.equal(meetWindowForArm({ sighting: presence(null), call: { phase: "unknown", via: null }, callReadAtMs: null, nowMs: NOW }).windowHandle, null);
-  assert.equal(meetWindowForArm({ sighting: presence(-4), call: { phase: "unknown", via: null }, callReadAtMs: null, nowMs: NOW }).windowHandle, null);
+  assert.equal(meetWindowForArm({ sighting: presence(null), call: { phase: "unknown", via: null }, latest: null, nowMs: NOW }).windowHandle, null);
+  assert.equal(meetWindowForArm({ sighting: presence(-4), call: { phase: "unknown", via: null }, latest: null, nowMs: NOW }).windowHandle, null);
 });
 
 test("geometry: PowerShell 5.1's wrapped-array shape is read like a plain array", () => {
   const raw = restored();
   const wrapped = { ...raw, doc: { value: raw.doc, Count: 4 } };
   assert.ok(sameMeetWindowGeometry(parseMeetWindowGeometry(wrapped), parseMeetWindowGeometry(raw)));
+});
+
+test("arm: a committed in-call state the latest read doubts is refused, not leaned on (#56 review 1)", () => {
+  const call = { phase: "in-call", via: "tab", windowHandle: 5555 };
+  // The Meet tab was switched away from: the newest reads say `unknown` (no surface) and await
+  // their ~2 s of confirmation; the window 5555 may already show another tab.
+  for (const latest of [
+    { phase: "unknown", via: null, atMs: NOW - 300 },
+    { phase: "unknown", via: "tab", windowHandle: 5555, atMs: NOW - 300 },
+    { phase: "left", via: "tab", windowHandle: 5555, atMs: NOW - 300 },
+  ]) {
+    assert.deepEqual(
+      meetWindowForArm({ sighting: presence(5555), call, latest, nowMs: NOW }),
+      { windowHandle: null, inPictureInPicture: false, unsettled: true, source: "call-state" },
+      JSON.stringify(latest),
+    );
+  }
+  // Committed PiP doubted by the latest read: refused as well (and never as a capturable window).
+  const pipCall = { phase: "in-call", via: "pip" };
+  const pipDoubted = meetWindowForArm({ sighting: presence(2222), call: pipCall, latest: { phase: "unknown", via: null, atMs: NOW - 300 }, nowMs: NOW });
+  assert.equal(pipDoubted.unsettled, true);
+  assert.equal(pipDoubted.windowHandle, null);
+  // The latest reading agrees: the committed window is used, as before.
+  assert.deepEqual(meetWindowForArm({ sighting: presence(2222), call, latest: agree(call, NOW - 300), nowMs: NOW }), {
+    windowHandle: 5555,
+    inPictureInPicture: false,
+    unsettled: false,
+    source: "call-state",
+  });
+  // A stale doubting reading is no longer the tracker's word: presence answers, as for any stale tracker.
+  assert.equal(
+    meetWindowForArm({ sighting: presence(2222), call, latest: { phase: "unknown", via: null, atMs: NOW - CALL_READ_FRESH_MS - 1 }, nowMs: NOW })
+      .source,
+    "presence",
+  );
 });

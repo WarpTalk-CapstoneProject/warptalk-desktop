@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   MEET_SURFACE_SCRIPT,
-  GEOMETRY_HOLD_READS,
+  GEOMETRY_HOLD_MS,
   MeetCallStateTracker,
   buttonsFromUiaTree,
   classifyMeetCall,
@@ -14,6 +14,7 @@ import {
   parseMeetSurfaces,
   sightingFromScan,
 } from "../meet-call-state.ts";
+import { meetWindowForArm } from "../meet-window-geometry.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const load = (name) => JSON.parse(readFileSync(path.join(here, "fixtures", name), "utf8").replace(/^﻿/, ""));
@@ -889,7 +890,7 @@ test("sticky window: two Meet windows in the same phase, a focus change does not
 });
 
 test("held geometry: a transient failed layout read keeps the last good one, no geometry-less state", () => {
-  const { instance, calls } = tracker();
+  const { instance, calls, clock } = tracker();
   instance.ingest(parseMeetSurfaces([incallTab(2222)]));
   const good = instance.callState.windowGeometry;
   assert.ok(good);
@@ -898,11 +899,15 @@ test("held geometry: a transient failed layout read keeps the last good one, no 
   instance.ingest(parseMeetSurfaces([incallTab(2222, null)]));
   assert.equal(calls.length, 1, "no state without the layout was emitted");
   assert.deepEqual(instance.callState.windowGeometry, good);
-  // A good read again resets the count.
+  // A good read again restarts the hold, which is measured in time, not reads.
   instance.ingest(parseMeetSurfaces([incallTab(2222)]));
-  for (let i = 0; i < GEOMETRY_HOLD_READS; i++) instance.ingest(parseMeetSurfaces([incallTab(2222, null)]));
+  for (let elapsed = 0; elapsed < GEOMETRY_HOLD_MS; elapsed += 500) {
+    clock.ms += 500;
+    instance.ingest(parseMeetSurfaces([incallTab(2222, null)]));
+  }
   assert.equal(calls.length, 1);
   // Past the hold, it is let go.
+  clock.ms += 1;
   instance.ingest(parseMeetSurfaces([incallTab(2222, null)]));
   assert.equal(calls.length, 2);
   assert.equal("windowGeometry" in instance.callState, false);
@@ -938,6 +943,123 @@ test("tracker: the time of the last read that came back, not of the last change"
   assert.equal(instance.lastReadAtMs, clock.ms, "a failed read is not a read");
   instance.reset();
   assert.equal(instance.lastReadAtMs, null);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Review of eaddd8d: latest reading, tab-window preference, hold through PiP, one window per scan
+// ---------------------------------------------------------------------------------------------
+
+test("latest reading: a doubting read is visible before it commits, so an arm refuses (review 1)", () => {
+  const { instance, clock } = tracker();
+  instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+  assert.deepEqual(instance.latestReading, { phase: "in-call", via: "tab", windowHandle: 2222, atMs: clock.ms });
+  // The Meet tab switched away from (no PiP raised yet): `unknown`, not yet confirmed.
+  clock.ms += 1000;
+  instance.ingest([]);
+  assert.equal(instance.callState.phase, "in-call", "still committed: unknown needs confirming");
+  assert.deepEqual(instance.latestReading, { phase: "unknown", via: null, atMs: clock.ms });
+  // The old freshness (any read within 5 s) would have handed out 2222 here.
+  const arm = meetWindowForArm({
+    sighting: { windowHandle: 2222, via: "document" },
+    call: instance.callState,
+    latest: instance.latestReading,
+    nowMs: clock.ms + 100,
+  });
+  assert.equal(arm.unsettled, true);
+  assert.equal(arm.windowHandle, null);
+  // Back on the tab: agreed again, the window is handed out.
+  clock.ms += 500;
+  instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+  const again = meetWindowForArm({
+    sighting: { windowHandle: 9999, via: "document" },
+    call: instance.callState,
+    latest: instance.latestReading,
+    nowMs: clock.ms + 100,
+  });
+  assert.deepEqual([again.windowHandle, again.unsettled, again.source], [2222, false, "call-state"]);
+  // A failed read is not a reading; reset forgets it.
+  instance.ingestFailure();
+  assert.equal(instance.latestReading.phase, "in-call");
+  instance.reset();
+  assert.equal(instance.latestReading, null);
+});
+
+test("window preference: the tab's window survives a PiP / unknown stretch (review 2)", () => {
+  const a = incallTab(2222);
+  const b = incallTab(5555);
+  const inPip = { ...pip().micOn, windowHandle: 3333 };
+  const { instance, clock } = tracker();
+  instance.ingest(parseMeetSurfaces([a, b]));
+  assert.equal(instance.windowPreference, 2222);
+  // PiP commits at once (same phase) and carries no tab window...
+  instance.ingest(parseMeetSurfaces([inPip]));
+  assert.equal(instance.callState.via, "pip");
+  assert.equal(instance.callState.windowHandle, undefined);
+  assert.equal(instance.windowPreference, 2222, "...but the preference is kept");
+  // ...and so does a confirmed `unknown` with no surface at all.
+  instance.ingest([]);
+  clock.ms += 2000;
+  instance.ingest([]);
+  assert.equal(instance.callState.phase, "unknown");
+  assert.equal(instance.windowPreference, 2222);
+  // Back with both windows, the other one first in Z-order: still the window reported before.
+  instance.ingest(parseMeetSurfaces([b, a]));
+  assert.equal(instance.callState.windowHandle, 2222);
+  instance.reset();
+  assert.equal(instance.windowPreference, null);
+});
+
+test("held geometry: dropped when a PiP or surface-less reading commits (review 3)", () => {
+  for (const away of [[{ ...pip().micOn, windowHandle: 3333 }], []]) {
+    const { instance, clock } = tracker();
+    instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+    assert.ok(instance.callState.windowGeometry);
+    clock.ms += 600;
+    instance.ingest(parseMeetSurfaces(away));
+    if (away.length === 0) {
+      // `unknown` needs confirming; until it commits the hold stays.
+      clock.ms += 1600;
+      instance.ingest([]);
+      assert.equal(instance.callState.phase, "unknown");
+    }
+    // Back on the tab well inside GEOMETRY_HOLD_MS of the last good layout, but without one:
+    // the layout from before the stretch is not re-applied.
+    clock.ms += 200;
+    instance.ingest(parseMeetSurfaces([incallTab(2222, null)]));
+    assert.equal(instance.callState.via, "tab");
+    assert.equal("windowGeometry" in instance.callState, false, JSON.stringify(away.map((s) => s.surface)));
+  }
+  // A tab reading that is `unknown` (same window) does not drop it: that is a tab reading.
+  const { instance, clock } = tracker();
+  instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+  const good = instance.callState.windowGeometry;
+  clock.ms += 500;
+  instance.ingest(parseMeetSurfaces([incallTab(2222, null, { buttons: [] })]));
+  clock.ms += 500;
+  instance.ingest(parseMeetSurfaces([incallTab(2222, null)]));
+  assert.deepEqual(instance.callState.windowGeometry, good);
+});
+
+test("sighting and call state name the same window when two Meet windows tie (review 5)", () => {
+  const a = incallTab(2222);
+  const b = incallTab(5555);
+  const { instance } = tracker();
+  instance.ingest(parseMeetSurfaces([a, b]));
+  // Focus moves to the other window: Z-order now lists 5555 first.
+  const surfaces = parseMeetSurfaces([b, a]);
+  const sighting = sightingFromScan(null, surfaces, { preferWindowHandle: instance.windowPreference });
+  instance.ingest(surfaces);
+  assert.equal(instance.callState.windowHandle, 2222);
+  assert.equal(sighting.windowHandle, instance.callState.windowHandle);
+  // Without the preference the two would have disagreed.
+  assert.equal(sightingFromScan(null, surfaces).windowHandle, 5555);
+});
+
+test("the URL sensor classifies its sighting with the tracker's window preference (review 5)", () => {
+  const source = readFileSync(path.join(here, "..", "meet-url-sensor.ts"), "utf8");
+  assert.match(source, /sightingFromScan\(parsed\.sighting \?\? null, surfaces, \{ preferWindowHandle: this\.windowPreference\?\.\(\) \?\? null \}\)/);
+  const main = readFileSync(path.join(here, "..", "index.ts"), "utf8");
+  assert.match(main, /meetUrlSensor\.setWindowPreference\(\(\) => meetCallTracker\.windowPreference\)/);
 });
 
 test("the helper looks each window up once, and compiles its C# once", () => {

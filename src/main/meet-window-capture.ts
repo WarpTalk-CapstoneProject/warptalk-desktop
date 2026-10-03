@@ -49,8 +49,12 @@
  *   recording the old window, which now shows some other tab. The call state carries the HWND the
  *   call was read from (`MeetCallState.windowHandle`) and a granted arm answers with the HWND it
  *   will hand out (`windowHandle` on the result), so the web app sees the two differ and arms
- *   again. The arm takes the call-state tracker's window first (meetWindowHandleForArm), because
- *   right after a drag the presence sighting still names the old one.
+ *   again. Which window an arm captures, and whether it is refused as PiP, is decided in one place
+ *   from one source (meetWindowForArm, meet-window-geometry.ts): the call-state tracker's in-call
+ *   reading while its latest read is fresh and agrees with it - right after a drag the presence
+ *   sighting still names the old window - and the presence sighting otherwise. An in-call state the
+ *   latest read already doubts (an `unknown` awaiting confirmation) is refused as `meet-not-on-tab`:
+ *   the window may already show another tab, and the web app arms again once it has settled.
  */
 
 import type { ArmMeetWindowCaptureResult } from "../shared/types.ts";

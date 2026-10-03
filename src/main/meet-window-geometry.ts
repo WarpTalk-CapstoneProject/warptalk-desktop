@@ -146,7 +146,7 @@ export function sameMeetWindowGeometry(
   return sameRect(a.frame, b.frame) && sameRect(a.window, b.window) && sameRect(a.content, b.content);
 }
 
-/** How recent the call-state tracker's last successful read must be for an arm to lean on it. */
+/** How recent the call-state tracker's latest read must be for an arm to lean on it. */
 export const CALL_READ_FRESH_MS = 5_000;
 
 export interface MeetWindowForArm {
@@ -154,19 +154,40 @@ export interface MeetWindowForArm {
   windowHandle: number | null;
   /** Meet is in Chrome's picture-in-picture window: the arm is refused (B18). */
   inPictureInPicture: boolean;
+  /**
+   * The committed in-call state is being doubted: the tracker's latest reading says something else
+   * (`unknown` or `left` awaiting confirmation). The arm is refused like PiP (`meet-not-on-tab`) and
+   * the web app arms again once the state has settled.
+   */
+  unsettled: boolean;
   /** Which source answered, for the log line. */
   source: "call-state" | "presence";
+}
+
+/** The tracker's newest reading (MeetCallStateTracker.latestReading), before confirmation. */
+export interface MeetLatestCallReading {
+  phase: MeetCallState["phase"];
+  via: MeetCallState["via"];
+  windowHandle?: number;
+  /** Date.now() when the read came back. */
+  atMs: number;
 }
 
 /**
  * Which window an arm captures, and whether Meet is in PiP — both from ONE source, so the HWND and
  * the PiP gate can never disagree about which read they came from.
  *
- *   call-state  the tracker's committed reading is `in-call` and its last successful read is at
- *               most CALL_READ_FRESH_MS old. On the tab, with a handle: that window, not PiP. In
- *               PiP: refused. The tracker reads every second; right after the Meet tab is dragged
- *               into a new window — or out of PiP back onto a tab — it already names the new state
- *               while presence (every 3 s) may still name the old one.
+ *   call-state  the tracker's committed reading is `in-call`, and its LATEST reading is at most
+ *               CALL_READ_FRESH_MS old and agrees with it (phase, tab/PiP, window). On the tab, with
+ *               a handle: that window, not PiP. In PiP: refused. The tracker reads every second;
+ *               right after the Meet tab is dragged into a new window — or out of PiP back onto a
+ *               tab — it already names the new state while presence (every 3 s) may still name the
+ *               old one.
+ *   unsettled   the committed reading is `in-call` but the latest fresh one disagrees: `unknown` or
+ *               `left` are only committed after ~2 s of confirmation, and meanwhile the window may
+ *               already show another tab. Refused; presence is no help here, as it may be the same
+ *               age as the committed state or older. Freshness is the latest reading's, never "the
+ *               last read" alone - a read that disagrees is not evidence for the state it doubts.
  *   presence    anything else (lobby, `unknown`, a stale tracker, no handle): the presence sighting,
  *               which the tracker's own reads also refresh (MeetPresenceWatcher.noteWindow). A
  *               tracker that last said PiP still refuses: B18 never records the PiP window, and a
@@ -175,21 +196,29 @@ export interface MeetWindowForArm {
 export function meetWindowForArm(input: {
   sighting: { windowHandle: number | null; via: "document" | "pip" | null };
   call: Pick<MeetCallState, "phase" | "via" | "windowHandle">;
-  /** Date.now() of the tracker's last successful read; null when it has none. */
-  callReadAtMs: number | null;
+  /** The tracker's latest reading; null when it has none. */
+  latest: MeetLatestCallReading | null;
   nowMs: number;
 }): MeetWindowForArm {
-  const { sighting, call } = input;
-  const fresh = input.callReadAtMs !== null && input.nowMs - input.callReadAtMs <= CALL_READ_FRESH_MS;
+  const { sighting, call, latest } = input;
+  const fresh = latest !== null && input.nowMs - latest.atMs <= CALL_READ_FRESH_MS;
   if (fresh && call.phase === "in-call") {
-    if (call.via === "pip") return { windowHandle: sighting.windowHandle, inPictureInPicture: true, source: "call-state" };
+    const agrees =
+      latest.phase === call.phase &&
+      latest.via === call.via &&
+      (latest.windowHandle ?? null) === (call.windowHandle ?? null);
+    if (!agrees) return { windowHandle: null, inPictureInPicture: false, unsettled: true, source: "call-state" };
+    if (call.via === "pip") {
+      return { windowHandle: sighting.windowHandle, inPictureInPicture: true, unsettled: false, source: "call-state" };
+    }
     if (call.via === "tab" && isWindowHandle(call.windowHandle)) {
-      return { windowHandle: call.windowHandle, inPictureInPicture: false, source: "call-state" };
+      return { windowHandle: call.windowHandle, inPictureInPicture: false, unsettled: false, source: "call-state" };
     }
   }
   return {
     windowHandle: isWindowHandle(sighting.windowHandle) ? sighting.windowHandle : null,
     inPictureInPicture: sighting.via === "pip" || call.via === "pip",
+    unsettled: false,
     source: "presence",
   };
 }

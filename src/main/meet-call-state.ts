@@ -416,6 +416,16 @@ export interface MeetCallReading {
   windowGeometry?: MeetWindowGeometry;
 }
 
+/** `MeetCallStateTracker.latestReading`: the newest reading, before confirmation. */
+export interface MeetLatestReading {
+  phase: MeetCallPhase;
+  via: "tab" | "pip" | null;
+  /** The tab's window; absent for PiP, no surface, or a surface without a handle. */
+  windowHandle?: number;
+  /** Date.now() when it came back. */
+  atMs: number;
+}
+
 export interface MeetSelfMicReading {
   muted: boolean | null;
   /** True when this reading should not be trusted as current (see `MeetSelfMic`). */
@@ -638,8 +648,15 @@ function reconcileMic(best: MeetCallClassification, all: MeetCallClassification[
  * judged a fair price for not losing Meet on every tab switch; it is the reason the title match is
  * exact, the document must be `about:blank`, and a call control must be present as well.
  */
-export function sightingFromScan(sighting: MeetSighting | null, surfaces: MeetSurface[]): MeetSighting | null {
-  const best = classifyMeetCall(surfaces);
+export function sightingFromScan(
+  sighting: MeetSighting | null,
+  surfaces: MeetSurface[],
+  options: { preferWindowHandle?: number | null } = {},
+): MeetSighting | null {
+  // The SAME window preference as the tracker's (MeetCallStateTracker.windowPreference): with two
+  // Meet windows in one phase, presence and the call state must name the same window, or an arm
+  // that falls back to presence would capture the other one (#56 review).
+  const best = classifyMeetCall(surfaces, options);
   if (best.call.phase === "in-call" && best.surface) {
     // The window goes with it: the sighting it replaces may have been read from another window
     // (the URL read prefers a normal window), and a recording must capture the one the call is in.
@@ -900,13 +917,18 @@ export interface MeetSelfMicRead extends Partial<MeetSelfMicEvidence> {
 const CONFIRM_READS: Record<MeetCallPhase, number> = { "in-call": 1, lobby: 1, left: 2, unknown: 2 };
 
 /**
- * How many consecutive tab readings of the same window may come back without a layout before the
- * last good one is let go. A single geometry read that failed its checks (a UI Automation call
- * caught mid-update, a DWM call that failed) must not turn the recording's crop off for a second
- * and show the tab strip; a layout that stays unreadable for this many reads (~3 s) is dropped.
- * A different window, or a minimized one, drops it at once.
+ * How long after the last good layout of the tab's window a tab reading of the same window that
+ * came back without one still carries it. A single geometry read that failed its checks (a UI
+ * Automation call caught mid-update, a DWM call that failed) must not turn the recording's crop off
+ * for a second and show the tab strip; a layout that stays unreadable for longer than this is
+ * dropped. Time, not a count of reads: the 1 s state reads and the 3 s presence looks interleave,
+ * so "three reads" was about two seconds, not three.
+ *
+ * Dropped at once by a different window, a minimized one, and any committed reading that is not of
+ * a tab (PiP, `unknown` with no surface): a layout from before a PiP stretch says nothing about the
+ * window after it - the bookmarks bar may have been toggled, the window resized meanwhile.
  */
-export const GEOMETRY_HOLD_READS = 3;
+export const GEOMETRY_HOLD_MS = 3_000;
 
 /**
  * The window and its layout count as a change: a Meet tab dragged into a new window, or the
@@ -940,9 +962,16 @@ export class MeetCallStateTracker {
   private polling = false;
   private timer: unknown = null;
   private generation = 0;
-  /** The last good layout of the tab's window, and how many readings since have lacked one. */
-  private heldGeometry: { windowHandle: number; geometry: MeetWindowGeometry; misses: number } | null = null;
-  private lastReadMs: number | null = null;
+  /** The last good layout of the tab's window, and when it was read. See GEOMETRY_HOLD_MS. */
+  private heldGeometry: { windowHandle: number; geometry: MeetWindowGeometry; atMs: number } | null = null;
+  /** The newest reading that came back, BEFORE confirmation; see `latestReading`. */
+  private latest: MeetLatestReading | null = null;
+  /**
+   * The browser window of the last committed TAB reading. Unlike `call.windowHandle` it survives a
+   * PiP or `unknown` stretch (those readings carry no tab window), so returning to the tab with two
+   * Meet windows open still goes to the window reported before. See `windowPreference`.
+   */
+  private lastTabWindowHandle: number | null = null;
   private readonly options: MeetCallStateTrackerOptions;
   private readonly now: () => number;
 
@@ -970,10 +999,30 @@ export class MeetCallStateTracker {
 
   /**
    * Date.now() of the last read that came back (from either cadence), or null. The committed state
-   * only changes when a reading differs, so this - not `callState.atMs` - is how fresh it is.
+   * only changes when a reading differs, so this - not `callState.atMs` - is how recent the last
+   * look was. It is NOT how fresh the committed state is: see `latestReading`.
    */
   get lastReadAtMs(): number | null {
-    return this.lastReadMs;
+    return this.latest?.atMs ?? null;
+  }
+
+  /**
+   * The newest reading that came back, as read - before the confirmation `left` / `unknown` need.
+   * While it disagrees with `callState` the committed state is being doubted (for ~2 s), and an arm
+   * must not lean on it: the Meet tab may already be gone from that window (meetWindowForArm).
+   * Failed reads do not count; null before the first read and after `reset`.
+   */
+  get latestReading(): MeetLatestReading | null {
+    return this.latest;
+  }
+
+  /**
+   * The window a tie between two Meet windows goes to (classifyMeetCall's `preferWindowHandle`).
+   * The URL sensor classifies its sighting with the same value (sightingFromScan), so presence and
+   * the call state never name different windows.
+   */
+  get windowPreference(): number | null {
+    return this.lastTabWindowHandle;
   }
 
   /** Starts or stops the fast loop. Idempotent. Stopping it forgets nothing. */
@@ -996,21 +1045,31 @@ export class MeetCallStateTracker {
     if (!this.options.probe) return;
     this.candidate = null;
     this.heldGeometry = null;
-    this.lastReadMs = null;
+    this.latest = null;
+    this.lastTabWindowHandle = null;
     this.commit({ phase: "unknown", via: null, meetCode: null, reason }, NO_MIC);
   }
 
   /** One look's worth of surfaces, from either cadence. */
   ingest(surfaces: MeetSurface[]): void {
-    this.lastReadMs = this.now();
+    const atMs = this.now();
     const { call, mic, surface, micEvidence } = classifyMeetCall(surfaces, {
-      preferWindowHandle: this.call.windowHandle,
+      preferWindowHandle: this.lastTabWindowHandle,
     });
-    this.observe(this.withHeldGeometry(call, surface), mic, micEvidence);
+    this.latest = {
+      phase: call.phase,
+      via: call.via,
+      ...(isWindowHandle(call.windowHandle) ? { windowHandle: call.windowHandle } : {}),
+      atMs,
+    };
+    this.observe(this.withHeldGeometry(call, surface, atMs), mic, micEvidence);
   }
 
-  /** See GEOMETRY_HOLD_READS. Readings that are not of a tab neither use nor change the hold. */
-  private withHeldGeometry(call: MeetCallReading, surface: MeetSurface | null): MeetCallReading {
+  /**
+   * See GEOMETRY_HOLD_MS. Readings that are not of a tab neither use nor change the hold here; the
+   * commit of one drops it (`commit`).
+   */
+  private withHeldGeometry(call: MeetCallReading, surface: MeetSurface | null, atMs: number): MeetCallReading {
     const windowHandle = call.windowHandle;
     if (call.via !== "tab" || !isWindowHandle(windowHandle)) return call;
     if (surface?.minimized) {
@@ -1018,12 +1077,11 @@ export class MeetCallStateTracker {
       return call;
     }
     if (call.windowGeometry) {
-      this.heldGeometry = { windowHandle, geometry: call.windowGeometry, misses: 0 };
+      this.heldGeometry = { windowHandle, geometry: call.windowGeometry, atMs };
       return call;
     }
     const held = this.heldGeometry;
-    if (held && held.windowHandle === windowHandle && held.misses < GEOMETRY_HOLD_READS) {
-      held.misses += 1;
+    if (held && held.windowHandle === windowHandle && atMs - held.atMs <= GEOMETRY_HOLD_MS) {
       return { ...call, windowGeometry: held.geometry };
     }
     this.heldGeometry = null;
@@ -1085,6 +1143,12 @@ export class MeetCallStateTracker {
 
   private commit(call: MeetCallReading, reading: MeetSelfMicReading, evidence?: MeetSelfMicEvidence): void {
     const atMs = this.now();
+    if (call.via === "tab") {
+      if (isWindowHandle(call.windowHandle)) this.lastTabWindowHandle = call.windowHandle;
+    } else {
+      // PiP, or no surface at all: whatever layout was held belongs to before this stretch.
+      this.heldGeometry = null;
+    }
     if (!sameCall(this.call, call)) {
       this.call = { ...call, atMs };
       this.options.emitCallState(this.call);

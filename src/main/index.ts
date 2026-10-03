@@ -193,6 +193,9 @@ const meetCallTracker = new MeetCallStateTracker({
     mainLog?.info("meet", "self mic read", read);
   },
 });
+// The sensor picks its sighting's window with the tracker's own tie-break, so presence and the call
+// state never name two different Meet windows (sightingFromScan).
+if (meetUrlSensor instanceof MeetUrlSensor) meetUrlSensor.setWindowPreference(() => meetCallTracker.windowPreference);
 
 /** The presence look, which on Windows also carries the buttons the call-state tracker reads. */
 async function readMeetSighting(): Promise<Awaited<ReturnType<MeetUrlSensor["read"]>>> {
@@ -478,7 +481,7 @@ function registerIpcHandlers(): void {
       const target = meetWindowForArm({
         sighting: { windowHandle: meetPresenceWatcher.meetWindowHandle, via: meetPresenceWatcher.meetWindowVia },
         call: meetCallTracker.callState,
-        callReadAtMs: meetCallTracker.lastReadAtMs,
+        latest: meetCallTracker.latestReading,
         nowMs: Date.now(),
       });
       const resolved = resolveMeetWindowSource(
@@ -486,12 +489,16 @@ function registerIpcHandlers(): void {
           armed: meetPresenceWatcher.armed,
           visible: meetPresenceWatcher.meetWindowVisible,
           windowHandle: target.windowHandle,
-          inPictureInPicture: target.inPictureInPicture,
+          // An in-call state being doubted is refused like PiP (meet-not-on-tab): the web app
+          // arms again once it has settled.
+          inPictureInPicture: target.inPictureInPicture || target.unsettled,
         },
         sources,
       );
       if (!resolved.ok) {
-        console.log(`Meet window capture not armed: ${resolved.reason} (from ${target.source}).`);
+        console.log(
+          `Meet window capture not armed: ${resolved.reason} (from ${target.source}${target.unsettled ? ", call state unsettled" : ""}).`,
+        );
         return { ok: false, reason: resolved.reason };
       }
 
