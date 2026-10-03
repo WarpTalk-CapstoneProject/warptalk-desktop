@@ -29,7 +29,7 @@ import {
   createNativeWindowsLoopbackAdapter,
   WindowsLoopbackRuntime,
 } from "./windows-loopback-runtime";
-import { MeetPresenceWatcher } from "./meet-presence";
+import { MeetPresenceWatcher, sightingForPresence } from "./meet-presence";
 import { RendererCrashGuard, windowBackgroundColor } from "./renderer-recovery";
 import {
   createMainLog,
@@ -225,7 +225,8 @@ async function readMeetSighting(): Promise<Awaited<ReturnType<MeetUrlSensor["rea
     // carries a closed tab's verdict (meet-tab-identity.ts).
     const scan = await meetUrlSensor.scan("look", meetCallTracker.tabWatchList);
     meetCallTracker.ingest(scan.surfaces, { full: scan.full, tabChecks: scan.tabChecks });
-    return scan.sighting;
+    // The post-call page is a Meet window, not a call to claim a room for (sightingForPresence).
+    return sightingForPresence(scan.sighting, meetCallTracker.callState);
   } catch (error) {
     meetCallTracker.ingestFailure();
     throw error;
