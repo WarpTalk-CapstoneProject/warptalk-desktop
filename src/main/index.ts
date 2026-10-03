@@ -65,6 +65,7 @@ import {
 } from "./meet-captions";
 import { MeetMicStateStream, MicSessionSensor } from "./meet-mic-state";
 import { MeetCallStateTracker } from "./meet-call-state";
+import { meetWindowHandleForArm } from "./meet-window-geometry";
 import { TranscriptPanelLedger } from "./transcript-panel";
 import { SignedOutMeetPrompt } from "./signed-out-meet-prompt";
 import { trayMenuTemplate } from "./tray-menu";
@@ -88,6 +89,7 @@ import type {
 } from "../shared/types";
 import {
   describeWindowsLoopbackSources,
+  parseDesktopSourceWindowHandle,
   resolveWindowOwnerProcessId,
 } from "./windows-loopback-sources";
 import {
@@ -446,7 +448,13 @@ function registerIpcHandlers(): void {
         {
           armed: meetPresenceWatcher.armed,
           visible: meetPresenceWatcher.meetWindowVisible,
-          windowHandle: meetPresenceWatcher.meetWindowHandle,
+          // The tab's window as the call-state tracker last read it, ahead of the slower presence
+          // sighting: right after a Meet tab is dragged into a new window, only the tracker
+          // already names the new one (meet-window-geometry.ts).
+          windowHandle: meetWindowHandleForArm({
+            sightingHandle: meetPresenceWatcher.meetWindowHandle,
+            call: meetCallTracker.callState,
+          }),
           inPictureInPicture:
             meetPresenceWatcher.meetWindowVia === "pip" || meetCallTracker.callState.via === "pip",
         },
@@ -461,8 +469,14 @@ function registerIpcHandlers(): void {
         { webContentsId: event.sender.id, source: resolved.source, roomId: roomId as string },
         Date.now(),
       );
-      console.log("Meet window capture armed for the next getDisplayMedia from the main window.");
-      return { ok: true, sourceName: resolved.source.name };
+      const windowHandle = parseDesktopSourceWindowHandle(resolved.source.id);
+      console.log(`Meet window capture armed for the next getDisplayMedia from the main window (HWND ${windowHandle}).`);
+      // The HWND goes back so the web app can tell when the Meet tab has moved to another window.
+      return {
+        ok: true,
+        sourceName: resolved.source.name,
+        ...(typeof windowHandle === "number" ? { windowHandle } : {}),
+      };
     },
   );
   // Arm/disarm rather than a query: the renderer would otherwise have to poll main, which polls

@@ -61,8 +61,9 @@
 
 import { normalizeLabel } from "./meet-caption-vocab.ts";
 import { MEET_CODE, childrenOf, type UiaNode } from "./meet-captions.ts";
-import type { MeetCallState, MeetSelfMic } from "../shared/types.ts";
+import type { MeetCallState, MeetSelfMic, MeetWindowGeometry } from "../shared/types.ts";
 import type { MeetSighting } from "./meet-url-sensor.ts";
+import { parseMeetWindowGeometry, sameMeetWindowGeometry } from "./meet-window-geometry.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Evidence
@@ -89,6 +90,12 @@ export interface MeetSurface {
    * Absent from older helper payloads.
    */
   windowHandle?: number | null;
+  /**
+   * Where the page content sits in that window (tab surfaces only), for cropping the browser chrome
+   * out of the recording. Absent when it could not be read or did not add up; see
+   * meet-window-geometry.ts.
+   */
+  geometry?: MeetWindowGeometry;
   /** The window is minimized. Chrome may stop updating the tree then (not measured). */
   minimized?: boolean;
   /** The listing hit the helper's cap; a control past it may be missing. */
@@ -118,11 +125,14 @@ export function parseMeetSurfaces(raw: unknown): MeetSurface[] {
       if (!b || typeof b !== "object") continue;
       buttons.push({ n: typeof b.n === "string" ? b.n : "", c: typeof b.c === "string" ? b.c : "" });
     }
+    // Only a tab is ever cropped: the PiP window is never recorded (B18).
+    const geometry = kind === "tab" ? parseMeetWindowGeometry(item.geometry) : null;
     out.push({
       surface: kind,
       meetCode: code,
       processId: typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? pid : null,
       ...(typeof hwnd === "number" && Number.isSafeInteger(hwnd) && hwnd > 0 ? { windowHandle: hwnd } : {}),
+      ...(geometry ? { geometry } : {}),
       minimized: item.minimized === true,
       truncated: item.truncated === true,
       buttons,
@@ -297,6 +307,10 @@ export interface MeetCallReading {
   meetCode: string | null;
   /** Why, in a fixed vocabulary - for logs and for the web side's diagnostics, not for display. */
   reason: string;
+  /** The window the surface was read from, when it named one. See `MeetCallState.windowHandle`. */
+  windowHandle?: number;
+  /** Tab surfaces only. See `MeetCallState.windowGeometry`. */
+  windowGeometry?: MeetWindowGeometry;
 }
 
 export interface MeetSelfMicReading {
@@ -342,11 +356,15 @@ export function classifyMeetSurface(surface: MeetSurface): MeetCallClassificatio
       // there was not measured.
       { muted: mic.muted, stale: mic.muted !== null && surface.minimized === true, via: mic.muted === null ? null : mic.via }
     : NO_MIC;
+  const windowHandle = surface.windowHandle;
   const reading = (phase: MeetCallPhase, reason: string): MeetCallReading => ({
     phase,
     via: surface.surface,
     meetCode,
     reason,
+    // Present only when known, so a reading without them looks exactly as it did before.
+    ...(typeof windowHandle === "number" ? { windowHandle } : {}),
+    ...(surface.surface === "tab" && surface.geometry ? { windowGeometry: surface.geometry } : {}),
   });
 
   if (surface.surface === "pip") {
@@ -445,8 +463,32 @@ export function sightingFromScan(sighting: MeetSighting | null, surfaces: MeetSu
  * The PiP gate is here because it decides what gets READ, not what it means: only a browser window
  * whose document is `about:blank` and whose title is exactly `Meet - <code>` (case-sensitive, no
  * " - Google Chrome" suffix - a normal tab on a page titled like that fails both tests).
+ *
+ * For a tab it also reads where the page sits in its window (Get-MeetGeometry), raw, for the
+ * recording's crop; meet-window-geometry.ts judges it. That read is fenced off on every side: a
+ * failure there, an entry point missing on an old Windows, a rectangle that is empty or infinite
+ * (ConvertTo-Json would write `Infinity` and break the whole answer), all give `geometry = $null`
+ * and leave the surface itself exactly as it was.
  */
 export const MEET_SURFACE_SCRIPT = String.raw`
+Add-Type @'
+using System;using System.Runtime.InteropServices;
+public class MeetGeom {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c);
+  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
+}
+'@
+# Per-monitor DPI aware (v2 = -4), so GetWindowRect, DWM and UI Automation all answer in physical
+# pixels, the unit of a captured frame. Refused when the host already chose (then the thread-level
+# call still applies) and absent before Windows 10 1607 (then the cross-check in
+# meet-window-geometry.ts drops a geometry whose spaces disagree).
+try { [void][MeetGeom]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) } catch {}
+try { [void][MeetGeom]::SetThreadDpiAwarenessContext([IntPtr]::new(-4)) } catch {}
+# DWMWA_EXTENDED_FRAME_BOUNDS: the visible window, without the invisible resize borders.
+$DWMWA_EXTENDED_FRAME_BOUNDS = 9
 $btnCond = New-Object System.Windows.Automation.PropertyCondition(
   [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
   [System.Windows.Automation.ControlType]::Button)
@@ -474,6 +516,38 @@ function Get-MeetButtons($doc) {
   return @{ list = $list; truncated = ($all.Count -gt $MAX_BUTTONS) }
 }
 
+# A UI Automation rectangle as [left, top, right, bottom] in whole pixels, or null when it is empty
+# or not finite (an off-screen element reads as Rect.Empty, whose edges are infinite).
+function ConvertTo-Ltrb($r) {
+  if ($r -eq $null -or $r.IsEmpty) { return $null }
+  foreach ($v in @($r.Left, $r.Top, $r.Right, $r.Bottom)) {
+    if ([double]::IsNaN($v) -or [double]::IsInfinity($v)) { return $null }
+  }
+  return @([int][Math]::Round($r.Left), [int][Math]::Round($r.Top), [int][Math]::Round($r.Right), [int][Math]::Round($r.Bottom))
+}
+
+# Where the page sits in its window, raw: GetWindowRect, DWM's visible frame, UI Automation's
+# window rectangle and the Document's. Null for a minimized window or when the basics fail.
+function Get-MeetGeometry($w, $doc) {
+  if ([MeetWin]::IsIconic($w.H)) { return $null }
+  try { [void][MeetGeom]::SetThreadDpiAwarenessContext([IntPtr]::new(-4)) } catch {}
+  $gr = New-Object MeetGeom+RECT
+  if (-not [MeetGeom]::GetWindowRect($w.H, [ref]$gr)) { return $null }
+  $win = @($gr.Left, $gr.Top, $gr.Right, $gr.Bottom)
+  $efb = $null
+  try {
+    $er = New-Object MeetGeom+RECT
+    if ([MeetGeom]::DwmGetWindowAttribute($w.H, $DWMWA_EXTENDED_FRAME_BOUNDS, [ref]$er, 16) -eq 0) {
+      $efb = @($er.Left, $er.Top, $er.Right, $er.Bottom)
+    }
+  } catch { $efb = $null }
+  $uia = $null
+  try { $uia = ConvertTo-Ltrb ([System.Windows.Automation.AutomationElement]::FromHandle($w.H).Current.BoundingRectangle) } catch { $uia = $null }
+  $docRect = ConvertTo-Ltrb $doc.Current.BoundingRectangle
+  if ($docRect -eq $null) { return $null }
+  return @{ win = $win; efb = $efb; uia = $uia; doc = $docRect }
+}
+
 # $doc and $value are the Document and its address as Read-Window just read them for this window.
 function Get-MeetSurface($w, $doc, $value) {
   if ($doc -eq $null) { return $null }
@@ -495,11 +569,15 @@ function Get-MeetSurface($w, $doc, $value) {
     return $null
   }
   $buttons = Get-MeetButtons $doc
+  # Tabs only: the PiP window is never recorded, so it is never cropped either.
+  $geometry = $null
+  if ($kind -eq 'tab') { try { $geometry = Get-MeetGeometry $w $doc } catch { $geometry = $null } }
   return @{
     surface = $kind; meetCode = $code; processId = $w.Pid; windowHandle = $w.H.ToInt64()
     minimized = [bool][MeetWin]::IsIconic($w.H)
     truncated = [bool]$buttons.truncated
     buttons = $buttons.list
+    geometry = $geometry
   }
 }
 
@@ -582,8 +660,19 @@ const DEFAULT_INTERVAL_MS = 1000;
 const DEFAULT_CONFIRM_MS = 1500;
 const CONFIRM_READS: Record<MeetCallPhase, number> = { "in-call": 1, lobby: 1, left: 2, unknown: 2 };
 
+/**
+ * The window and its layout count as a change: a Meet tab dragged into a new window, or the
+ * bookmarks bar toggled, must reach the web app while the phase stays `in-call` (WT-910).
+ */
 function sameCall(a: MeetCallState, b: MeetCallReading): boolean {
-  return a.phase === b.phase && a.via === b.via && a.meetCode === b.meetCode && a.reason === b.reason;
+  return (
+    a.phase === b.phase &&
+    a.via === b.via &&
+    a.meetCode === b.meetCode &&
+    a.reason === b.reason &&
+    a.windowHandle === b.windowHandle &&
+    sameMeetWindowGeometry(a.windowGeometry, b.windowGeometry)
+  );
 }
 
 /**

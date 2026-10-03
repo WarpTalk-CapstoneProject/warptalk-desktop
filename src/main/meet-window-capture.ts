@@ -43,6 +43,14 @@
  *   again when the tab is back. Arming is repeatable for that reason: each arm replaces the last,
  *   and only the first grant for a room announces the recording.
  *   macOS has no HWND and no sensor PID; it answers `unsupported-platform`.
+ *
+ * A MEET TAB MOVED TO ANOTHER WINDOW (2026-10-03)
+ *   Dragging the Meet tab out of its window gives the call a new HWND, and a granted capture keeps
+ *   recording the old window, which now shows some other tab. The call state carries the HWND the
+ *   call was read from (`MeetCallState.windowHandle`) and a granted arm answers with the HWND it
+ *   will hand out (`windowHandle` on the result), so the web app sees the two differ and arms
+ *   again. The arm takes the call-state tracker's window first (meetWindowHandleForArm), because
+ *   right after a drag the presence sighting still names the old one.
  */
 
 import type { ArmMeetWindowCaptureResult } from "../shared/types.ts";
