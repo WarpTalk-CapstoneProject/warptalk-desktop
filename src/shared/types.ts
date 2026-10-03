@@ -261,7 +261,16 @@ export interface AudioCaptureState {
  * window is never recorded (WT-910 B18); arm again once the call is back on its tab.
  */
 export type ArmMeetWindowCaptureResult =
-  | { ok: true; sourceName: string }
+  | {
+      ok: true;
+      sourceName: string;
+      /**
+       * The HWND of the window that will be handed out, so the web app can tell when the Meet tab
+       * has moved to another window (`MeetCallState.windowHandle`) and re-arm. Absent from older
+       * builds.
+       */
+      windowHandle?: number;
+    }
   | {
       ok: false;
       reason:
@@ -442,6 +451,46 @@ export interface MeetCallState {
   reason: string;
   /** Date.now() in main when this state was established. */
   atMs: number;
+  /**
+   * The top-level HWND of the window the answer was read from (the browser window that hosts the
+   * Meet tab, or the PiP window), as a decimal number. A Meet tab dragged into a new browser window
+   * changes it, and the web app re-arms its recording capture on the new one (WT-910). Absent when
+   * the surface had no handle, from older builds, and with `via: null`.
+   */
+  windowHandle?: number;
+  /**
+   * Where the page content sits in that window, for cropping the browser chrome (tab strip, address
+   * bar, bookmarks bar) out of the recording (WT-910). Only for `via: "tab"`; absent when it could
+   * not be read or failed its checks (see meet-window-geometry.ts), and from older builds.
+   */
+  windowGeometry?: MeetWindowGeometry;
+}
+
+/** A rectangle in physical screen pixels, relative to the top-left of `MeetWindowGeometry.frame`. */
+export interface MeetWindowRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * One browser window's layout, as read by UI Automation and Win32 in one coordinate space (the
+ * helper runs per-monitor DPI aware, so physical pixels). Everything is relative to the visible
+ * window's top-left, so moving the window changes nothing and only a real layout change (bookmarks
+ * bar toggled, window resized, fullscreen) produces a new value.
+ *
+ *   frame    the visible window: DWMWA_EXTENDED_FRAME_BOUNDS. Always x = y = 0.
+ *   window   GetWindowRect, which also covers the invisible resize borders (about 7-8 px on the
+ *            left, right and bottom; off-screen on a maximized window). A window capture's frame
+ *            covers one of these two; the web side tells which from the frame's own size.
+ *   content  the page's Document element: the web contents' viewport, below the tab strip, the
+ *            address bar, the bookmarks bar and any infobar, beside any side panel.
+ */
+export interface MeetWindowGeometry {
+  frame: MeetWindowRect;
+  window: MeetWindowRect;
+  content: MeetWindowRect;
 }
 
 /**

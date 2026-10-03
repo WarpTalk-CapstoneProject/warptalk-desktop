@@ -59,7 +59,10 @@ export interface MeetSighting {
    * The top-level HWND the sighting was read from, as a decimal number. It is what Electron puts
    * in a window source id (`window:<HWND>:0`), so it lets main hand exactly this window to a
    * screen capture without asking the page which window to take (meet-window-capture.ts).
-   * Kept in main like `processId`. Absent from the macOS sensor and from older payloads.
+   * Not part of `MeetPresence`. The call state carries the handle of the window the call was read
+   * from (`MeetCallState.windowHandle`), so the web app can re-arm the recording capture when a
+   * Meet tab is dragged into another window; an HWND names a window, it does not grant access to
+   * it. Absent from the macOS sensor and from older payloads.
    */
   windowHandle?: number | null;
   /** Which read produced this, for diagnosing a machine where one path works and the other does not. */
@@ -96,6 +99,13 @@ public class MeetWin {
   [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr h,out int pid);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   public delegate bool EnumProc(IntPtr h,IntPtr p);
+  // Window geometry for the recording's crop (meet-call-state.ts Get-MeetGeometry). In this one
+  // class so the helper compiles C# once: every Add-Type is a csc run of several hundred ms.
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c);
+  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
 }
 '@
 
@@ -153,6 +163,8 @@ function Get-BrowserWindows {
 
 function Read-Window($w) {
   $el = [System.Windows.Automation.AutomationElement]::FromHandle($w.H)
+  # Handed to Get-MeetGeometry (meet-call-state.ts), so the window is not looked up twice.
+  $script:el = $el
 
   $doc = $el.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $docCond)
   if ($doc -eq $null) { return $null }

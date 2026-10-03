@@ -65,6 +65,7 @@ import {
 } from "./meet-captions";
 import { MeetMicStateStream, MicSessionSensor } from "./meet-mic-state";
 import { MeetCallStateTracker } from "./meet-call-state";
+import { meetWindowForArm } from "./meet-window-geometry";
 import { TranscriptPanelLedger } from "./transcript-panel";
 import { SignedOutMeetPrompt } from "./signed-out-meet-prompt";
 import { trayMenuTemplate } from "./tray-menu";
@@ -88,6 +89,7 @@ import type {
 } from "../shared/types";
 import {
   describeWindowsLoopbackSources,
+  parseDesktopSourceWindowHandle,
   resolveWindowOwnerProcessId,
 } from "./windows-loopback-sources";
 import {
@@ -168,7 +170,13 @@ const meetUrlSensor = process.platform === "darwin" ? new MacMeetUrlSensor() : n
 const meetCallTracker = new MeetCallStateTracker({
   probe:
     meetUrlSensor instanceof MeetUrlSensor
-      ? async () => (await meetUrlSensor.scan("state")).surfaces
+      ? async () => {
+          const scan = await meetUrlSensor.scan("state");
+          // The same read refreshes presence's window and PiP flag, so an arm never leans on a
+          // sighting older than this second (meetWindowForArm, WT-910).
+          meetPresenceWatcher.noteWindow(scan.sighting);
+          return scan.surfaces;
+        }
       : null,
   emitCallState: (state) => {
     console.log("Meet call state:", JSON.stringify(state));
@@ -441,19 +449,27 @@ function registerIpcHandlers(): void {
         return { ok: false, reason: "meet-window-not-found" };
       }
 
-      // Read after the await: the sighting the arm is matched against is the newest one.
+      // Read after the await: the sighting the arm is matched against is the newest one. The
+      // window and the PiP gate come from ONE source (meetWindowForArm): the call-state tracker's
+      // fresh in-call reading when there is one, presence otherwise. Right after the Meet tab is
+      // dragged out of PiP or into a new window, only the tracker already knows.
+      const target = meetWindowForArm({
+        sighting: { windowHandle: meetPresenceWatcher.meetWindowHandle, via: meetPresenceWatcher.meetWindowVia },
+        call: meetCallTracker.callState,
+        callReadAtMs: meetCallTracker.lastReadAtMs,
+        nowMs: Date.now(),
+      });
       const resolved = resolveMeetWindowSource(
         {
           armed: meetPresenceWatcher.armed,
           visible: meetPresenceWatcher.meetWindowVisible,
-          windowHandle: meetPresenceWatcher.meetWindowHandle,
-          inPictureInPicture:
-            meetPresenceWatcher.meetWindowVia === "pip" || meetCallTracker.callState.via === "pip",
+          windowHandle: target.windowHandle,
+          inPictureInPicture: target.inPictureInPicture,
         },
         sources,
       );
       if (!resolved.ok) {
-        console.log(`Meet window capture not armed: ${resolved.reason}.`);
+        console.log(`Meet window capture not armed: ${resolved.reason} (from ${target.source}).`);
         return { ok: false, reason: resolved.reason };
       }
 
@@ -461,8 +477,16 @@ function registerIpcHandlers(): void {
         { webContentsId: event.sender.id, source: resolved.source, roomId: roomId as string },
         Date.now(),
       );
-      console.log("Meet window capture armed for the next getDisplayMedia from the main window.");
-      return { ok: true, sourceName: resolved.source.name };
+      const windowHandle = parseDesktopSourceWindowHandle(resolved.source.id);
+      console.log(
+        `Meet window capture armed for the next getDisplayMedia from the main window (HWND ${windowHandle}, from ${target.source}).`,
+      );
+      // The HWND goes back so the web app can tell when the Meet tab has moved to another window.
+      return {
+        ok: true,
+        sourceName: resolved.source.name,
+        ...(typeof windowHandle === "number" ? { windowHandle } : {}),
+      };
     },
   );
   // Arm/disarm rather than a query: the renderer would otherwise have to poll main, which polls

@@ -98,6 +98,20 @@ export class MeetPresenceWatcher {
     return this.last?.meetWindowVisible === true;
   }
 
+  /**
+   * A fresher read of WHERE Meet is, from the call-state tracker's 1 s `state` scan: the window and
+   * whether it is the PiP window, nothing else. Visibility and the room code stay with the 3 s poll
+   * (and so does `onChange`), so this never opens or closes a widget. Without it the window capture
+   * would be armed against a sighting up to 3 s old - right after the Meet tab is dragged out of
+   * PiP or into a new window, the wrong window or a stale PiP refusal (WT-910).
+   * Ignored while disarmed, before the first sighting, and for a read that saw no Meet.
+   */
+  noteWindow(sighting: MeetSighting | null): void {
+    if (!this.timer || !sighting || this.last?.meetWindowVisible !== true) return;
+    this.lastWindowHandle = sighting.windowHandle ?? null;
+    this.lastVia = sighting.via;
+  }
+
   /** Idempotent: arming an armed watcher keeps the one interval it already has. */
   arm(): void {
     if (this.timer) return;

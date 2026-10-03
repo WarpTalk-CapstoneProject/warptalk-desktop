@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   MEET_SURFACE_SCRIPT,
+  GEOMETRY_HOLD_READS,
   MeetCallStateTracker,
   buttonsFromUiaTree,
   classifyMeetCall,
@@ -516,4 +517,202 @@ test("the PiP title is matched whole and case-sensitively, and only over about:b
 
 test("the helper lists buttons and nothing else: no invoke, no focus, no keys", () => {
   assert.doesNotMatch(MEET_SURFACE_SCRIPT, /InvokePattern|SetFocus|SendKeys|SendWait|TogglePattern/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// WT-910: the window and its layout travel with the call state (crop + re-arm on a moved tab)
+// ---------------------------------------------------------------------------------------------
+
+const RAW_GEOMETRY = {
+  win: [93, 50, 1393, 857],
+  efb: [100, 50, 1386, 850],
+  uia: [93, 50, 1393, 857],
+  doc: [100, 166, 1386, 850],
+};
+
+test("window geometry: parsed for a tab, never kept for the PiP window, dropped when it does not add up", () => {
+  const [tab] = parseMeetSurfaces([{ surface: "tab", meetCode: "abc-defg-hij", processId: 7, buttons: [], geometry: RAW_GEOMETRY }]);
+  assert.deepEqual(tab.geometry.content, { x: 0, y: 116, width: 1286, height: 684 });
+  const [inPip] = parseMeetSurfaces([{ ...pip().micOn, geometry: RAW_GEOMETRY }]);
+  assert.equal("geometry" in inPip, false);
+  const [bad] = parseMeetSurfaces([
+    { surface: "tab", meetCode: "abc-defg-hij", buttons: [], geometry: { ...RAW_GEOMETRY, doc: [0, 0, 5000, 5000] } },
+  ]);
+  assert.equal("geometry" in bad, false);
+  // An older helper sends no geometry at all; the surface is exactly what it was.
+  const [legacy] = parseMeetSurfaces([{ surface: "tab", meetCode: "abc-defg-hij", buttons: [] }]);
+  assert.equal("geometry" in legacy, false);
+});
+
+test("window geometry: the call reading carries the window and the tab's layout, only when known", () => {
+  const [tab] = parseMeetSurfaces([
+    { ...tabSurface(`${LIVE}meet-s2a-incall-1.json`), windowHandle: 2222, geometry: RAW_GEOMETRY },
+  ]);
+  const { call } = classifyMeetSurface(tab);
+  assert.equal(call.phase, "in-call");
+  assert.equal(call.windowHandle, 2222);
+  assert.deepEqual(call.windowGeometry.frame, { x: 0, y: 0, width: 1286, height: 800 });
+  // Without them the reading has neither key: older consumers see the same object as before.
+  const plain = classifyMeetSurface(tabSurface(`${LIVE}meet-s2a-incall-1.json`)).call;
+  assert.equal("windowHandle" in plain, false);
+  assert.equal("windowGeometry" in plain, false);
+  // PiP: neither a window nor a crop (see the tab/PiP switch test below).
+  const [inPip] = parseMeetSurfaces([{ ...pip().micOn, windowHandle: 3333 }]);
+  const pipCall = classifyMeetSurface(inPip).call;
+  assert.equal("windowHandle" in pipCall, false);
+  assert.equal("windowGeometry" in pipCall, false);
+});
+
+test("tracker: a Meet tab dragged into a new window is a new call state, while still in-call", () => {
+  const { instance, calls } = tracker();
+  const read = (windowHandle, geometry = RAW_GEOMETRY) =>
+    parseMeetSurfaces([{ ...tabSurface(`${LIVE}meet-s2a-incall-1.json`), windowHandle, geometry }]);
+  instance.ingest(read(2222));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].windowHandle, 2222);
+  instance.ingest(read(2222));
+  assert.equal(calls.length, 1, "the same window and layout must not emit again");
+  instance.ingest(read(5555));
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].phase, "in-call");
+  assert.equal(calls[1].windowHandle, 5555);
+});
+
+test("tracker: the bookmarks bar toggled is a new call state; moving the window is not", () => {
+  const { instance, calls } = tracker();
+  const read = (geometry) =>
+    parseMeetSurfaces([{ ...tabSurface(`${LIVE}meet-s2a-incall-1.json`), windowHandle: 2222, geometry }]);
+  instance.ingest(read(RAW_GEOMETRY));
+  const moved = Object.fromEntries(Object.entries(RAW_GEOMETRY).map(([k, v]) => [k, v.map((n) => n + 300)]));
+  instance.ingest(read(moved));
+  assert.equal(calls.length, 1);
+  instance.ingest(read({ ...RAW_GEOMETRY, doc: [100, 136, 1386, 850] }));
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].windowGeometry.content.y, 86);
+});
+
+test("the helper reads the tab's geometry fenced off: never for PiP, never able to break the answer", () => {
+  const body = MEET_SURFACE_SCRIPT.slice(MEET_SURFACE_SCRIPT.indexOf("function Get-MeetSurface"));
+  assert.match(body, /if \(\$kind -eq 'tab'\) \{ try \{ \$geometry = Get-MeetGeometry \$w \$doc \$el \} catch \{ \$geometry = \$null \} \}/);
+  assert.match(body, /geometry = \$geometry/);
+  // Infinite edges (Rect.Empty) must never reach ConvertTo-Json.
+  assert.match(MEET_SURFACE_SCRIPT, /\[double\]::IsInfinity\(\$v\)/);
+  assert.match(MEET_SURFACE_SCRIPT, /SetThreadDpiAwarenessContext\(\[IntPtr\]::new\(-4\)\)/);
+  assert.match(MEET_SURFACE_SCRIPT, /\$DWMWA_EXTENDED_FRAME_BOUNDS = 9/);
+  // The DPI calls sit in try blocks: an entry point missing on an old Windows must not kill the helper.
+  for (const line of MEET_SURFACE_SCRIPT.split("\n").filter((l) => /DpiAwarenessContext\(\[IntPtr\]/.test(l))) {
+    assert.match(line, /^\s*try \{/, line);
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Review of #56: tab/PiP handles, sticky window, held geometry
+// ---------------------------------------------------------------------------------------------
+
+const incallTab = (windowHandle, geometry = RAW_GEOMETRY, overrides = {}) => ({
+  ...tabSurface(`${LIVE}meet-s2a-incall-1.json`),
+  windowHandle,
+  ...(geometry ? { geometry } : {}),
+  ...overrides,
+});
+
+test("tab/PiP switch: the call state's window is the TAB's, so going to PiP and back changes nothing", () => {
+  const { instance, calls } = tracker();
+  instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+  instance.ingest(parseMeetSurfaces([{ ...pip().micOn, windowHandle: 3333 }]));
+  instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+  assert.deepEqual(
+    calls.map((c) => [c.via, c.windowHandle]),
+    [
+      ["tab", 2222],
+      ["pip", undefined],
+      ["tab", 2222],
+    ],
+  );
+  // The presence sighting still names the PiP window, so the arm can refuse it (B18).
+  const [inPip] = parseMeetSurfaces([{ ...pip().micOn, windowHandle: 3333 }]);
+  assert.equal(sightingFromScan(null, [inPip]).windowHandle, 3333);
+});
+
+test("sticky window: two Meet windows in the same phase, a focus change does not flip the window", () => {
+  const a = incallTab(2222);
+  const b = incallTab(5555);
+  // Z-order puts the focused window first.
+  assert.equal(classifyMeetCall([a, b]).call.windowHandle, 2222);
+  assert.equal(classifyMeetCall([b, a], { preferWindowHandle: 2222 }).call.windowHandle, 2222);
+  // Without a preference (or one that is no longer a candidate) the first one wins, as before.
+  assert.equal(classifyMeetCall([b, a]).call.windowHandle, 5555);
+  assert.equal(classifyMeetCall([b, a], { preferWindowHandle: 7777 }).call.windowHandle, 5555);
+  // A preference never beats a surface further into the call.
+  const lobby = { ...tabSurface(`${LIVE}meet-s1-lobby-1.json`), windowHandle: 2222 };
+  assert.equal(classifyMeetCall([lobby, b], { preferWindowHandle: 2222 }).call.windowHandle, 5555);
+
+  const { instance, calls } = tracker();
+  instance.ingest(parseMeetSurfaces([a, b]));
+  instance.ingest(parseMeetSurfaces([b, a]));
+  instance.ingest(parseMeetSurfaces([b, a]));
+  assert.equal(calls.length, 1, "focusing the other window must not emit a new window");
+  assert.equal(instance.callState.windowHandle, 2222);
+  // The reported window goes away: the other one takes over.
+  instance.ingest(parseMeetSurfaces([b]));
+  assert.equal(instance.callState.windowHandle, 5555);
+});
+
+test("held geometry: a transient failed layout read keeps the last good one, no geometry-less state", () => {
+  const { instance, calls } = tracker();
+  instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+  const good = instance.callState.windowGeometry;
+  assert.ok(good);
+  // One read whose geometry failed its checks, then one with none at all.
+  instance.ingest(parseMeetSurfaces([incallTab(2222, { ...RAW_GEOMETRY, doc: [0, 0, 9000, 9000] })]));
+  instance.ingest(parseMeetSurfaces([incallTab(2222, null)]));
+  assert.equal(calls.length, 1, "no state without the layout was emitted");
+  assert.deepEqual(instance.callState.windowGeometry, good);
+  // A good read again resets the count.
+  instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+  for (let i = 0; i < GEOMETRY_HOLD_READS; i++) instance.ingest(parseMeetSurfaces([incallTab(2222, null)]));
+  assert.equal(calls.length, 1);
+  // Past the hold, it is let go.
+  instance.ingest(parseMeetSurfaces([incallTab(2222, null)]));
+  assert.equal(calls.length, 2);
+  assert.equal("windowGeometry" in instance.callState, false);
+});
+
+test("held geometry: never carried to another window or through a minimized one", () => {
+  const moved = tracker();
+  moved.instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+  moved.instance.ingest(parseMeetSurfaces([incallTab(5555, null)]));
+  assert.equal(moved.instance.callState.windowHandle, 5555);
+  assert.equal("windowGeometry" in moved.instance.callState, false);
+  // ...and not back onto the first window either: the hold was dropped with the change.
+  moved.instance.ingest(parseMeetSurfaces([incallTab(2222, null)]));
+  assert.equal("windowGeometry" in moved.instance.callState, false);
+
+  const minimized = tracker();
+  minimized.instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+  minimized.instance.ingest(parseMeetSurfaces([incallTab(2222, null, { minimized: true })]));
+  assert.equal("windowGeometry" in minimized.instance.callState, false);
+  minimized.instance.ingest(parseMeetSurfaces([incallTab(2222, null)]));
+  assert.equal("windowGeometry" in minimized.instance.callState, false);
+});
+
+test("tracker: the time of the last read that came back, not of the last change", () => {
+  const { instance, clock } = tracker();
+  assert.equal(instance.lastReadAtMs, null);
+  instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+  clock.ms += 5_000;
+  instance.ingest(parseMeetSurfaces([incallTab(2222)]));
+  assert.equal(instance.lastReadAtMs, clock.ms);
+  assert.notEqual(instance.callState.atMs, clock.ms);
+  instance.ingestFailure();
+  assert.equal(instance.lastReadAtMs, clock.ms, "a failed read is not a read");
+  instance.reset();
+  assert.equal(instance.lastReadAtMs, null);
+});
+
+test("the helper looks each window up once, and compiles its C# once", () => {
+  assert.doesNotMatch(MEET_SURFACE_SCRIPT, /FromHandle/);
+  assert.doesNotMatch(MEET_SURFACE_SCRIPT, /Add-Type @'/);
+  assert.match(MEET_SURFACE_SCRIPT, /\$script:el = \$null/);
+  assert.match(MEET_SURFACE_SCRIPT, /Get-MeetSurface \$w \$script:doc \$script:docValue \$script:el/);
 });

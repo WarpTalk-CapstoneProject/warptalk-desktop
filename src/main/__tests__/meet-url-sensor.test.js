@@ -68,3 +68,14 @@ test("the sensor script parses", { skip: process.platform !== "win32" && "PowerS
   });
   assert.equal(result.status, 0, `PowerShell parse errors:\n${result.stdout}${result.stderr}`);
 });
+
+test("the helper compiles C# once: the geometry P/Invokes live in MeetWin (WT-910 crop)", () => {
+  // Every Add-Type of source is a csc run of several hundred ms at helper start.
+  assert.equal(SENSOR_SCRIPT.match(/Add-Type @'/g)?.length, 1);
+  const cls = SENSOR_SCRIPT.slice(SENSOR_SCRIPT.indexOf("public class MeetWin"), SENSOR_SCRIPT.indexOf("'@"));
+  for (const member of ["GetWindowRect", "DwmGetWindowAttribute", "SetThreadDpiAwarenessContext", "struct RECT"]) {
+    assert.ok(cls.includes(member), member);
+  }
+  // Read-Window hands its window element on, so geometry does not look the window up again.
+  assert.match(SENSOR_SCRIPT, /\$script:el = \$el/);
+});
